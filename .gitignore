@@ -26,3 +26,9 @@ ds-bundle/
 venv/
 *.bak.*
 extension.crx
+.DS_Store
+*.mp4
+/*.png
+flow_session_project.json
+extension/_metadata/
+scratch/

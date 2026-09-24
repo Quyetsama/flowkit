@@ -174,10 +174,13 @@ def _attach_credit_estimate(data: object, snapshot: dict, cost: int | None):
 
 
 async def _resolve_direct_project(client, project_id: str) -> str:
-    """Use an explicit project, otherwise reuse/create the 2h ad-hoc session project."""
+    """Use an explicit project, otherwise fall back to FLOW_PROJECT_ID, otherwise reuse/create session project."""
     pid = str(project_id or "").strip()
     if pid:
         return pid
+    if FLOW_PROJECT_ID:
+        client._batch_active_project = FLOW_PROJECT_ID
+        return FLOW_PROJECT_ID
     try:
         session = await ensure_session_project(client)
     except Exception as exc:

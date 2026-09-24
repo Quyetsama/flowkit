@@ -65,6 +65,11 @@ async def _flow_page(browser: Any, project_id: str) -> Any:
 
 
 async def _wait_editor(page: Any) -> None:
+    # Ensure Agent Mode chip is off so standard settings-trigger-button is displayed
+    agent_chip = page.locator(".agent-mode-chip.agent-mode-chip-checked:visible").first
+    if await agent_chip.count():
+        await agent_chip.click()
+        await page.wait_for_timeout(300)
     await page.locator("button.settings-trigger-button").first.wait_for(
         state="visible", timeout=20_000
     )
@@ -76,6 +81,18 @@ async def _dismiss_overlays(page: Any) -> None:
     if await cookie.count():
         await cookie.click()
         await page.wait_for_timeout(250)
+    # Close any open drawer or settings panel (e.g. Agent Settings panel)
+    back = page.locator("button:visible").filter(
+        has=page.locator("mat-icon", has_text="arrow_back")
+    ).first
+    if await back.count():
+        await back.click()
+        await page.wait_for_timeout(250)
+    # Turn off Agent Mode chip if it was toggled on
+    agent_chip = page.locator(".agent-mode-chip.agent-mode-chip-checked:visible").first
+    if await agent_chip.count():
+        await agent_chip.click()
+        await page.wait_for_timeout(300)
     # Escape closes a stale menu/picker left by an interrupted previous run.
     await page.keyboard.press("Escape")
     await page.wait_for_timeout(100)
@@ -84,6 +101,10 @@ async def _dismiss_overlays(page: Any) -> None:
 
 
 async def _open_settings(page: Any) -> Any:
+    agent_chip = page.locator(".agent-mode-chip.agent-mode-chip-checked:visible").first
+    if await agent_chip.count():
+        await agent_chip.click()
+        await page.wait_for_timeout(300)
     settings = page.locator("button.settings-trigger-button").first
     await settings.wait_for(state="visible", timeout=10_000)
     radios = page.locator('button[role="radio"]:visible')
