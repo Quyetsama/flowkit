@@ -602,41 +602,54 @@ class BatchEngine:
         best_x = max(0, min(width - box_size, width - offset))
         best_y = max(0, min(height - box_size, height - offset))
 
-        # Verify watermark presence on first frame via template matching
+        # Verify watermark presence across multiple sample frames (25%, 50%, 75%)
+        # Single frame-0 check can produce false negatives if frame 0 has motion, textures, or fade-in
         try:
             import cv2
 
-            probe_frame_cmd = [
-                "ffmpeg", "-i", src, "-frames:v", "1",
-                "-f", "rawvideo", "-pix_fmt", "bgr24", "-v", "quiet", "-",
-            ]
-            probe_frame = subprocess.run(probe_frame_cmd, capture_output=True, timeout=10)
-            if probe_frame.returncode == 0 and len(probe_frame.stdout) == width * height * 3:
-                frame0 = np.frombuffer(probe_frame.stdout, dtype=np.uint8).reshape((height, width, 3))
-                gray = cv2.cvtColor(frame0, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                template_norm = (template / max(template.max(), 1e-6) * 255.0).astype(np.float32)
-
+            template_norm = (template / max(template.max(), 1e-6) * 255.0).astype(np.float32)
+            cap = cv2.VideoCapture(src)
+            if cap.isOpened():
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                sample_indices = [int(total_frames * p) for p in (0.25, 0.50, 0.75)] if total_frames > 3 else [0]
+                best_score = -1.0
+                best_loc = (best_x, best_y)
                 search_r = 4
-                sy = max(0, best_y - search_r)
-                sx = max(0, best_x - search_r)
-                ey = min(height, best_y + box_size + search_r)
-                ex = min(width, best_x + box_size + search_r)
-                sub = gray[sy:ey, sx:ex]
 
-                if sub.shape[0] >= box_size and sub.shape[1] >= box_size:
-                    res = cv2.matchTemplate(sub, template_norm, cv2.TM_CCOEFF_NORMED)
-                    _, max_v, _, max_l = cv2.minMaxLoc(res)
+                for idx in sample_indices:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                    ret, fr = cap.read()
+                    if not ret or fr is None:
+                        continue
+                    gray = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                    sy = max(0, best_y - search_r)
+                    sx = max(0, best_x - search_r)
+                    ey = min(height, best_y + box_size + search_r)
+                    ex = min(width, best_x + box_size + search_r)
+                    sub = gray[sy:ey, sx:ex]
 
-                    if max_v < 0.50:
-                        logger.info("Video watermark not detected (score=%.3f), skipping lossless removal", max_v)
-                        shutil.copyfile(src, dst)
-                        return True
+                    if sub.shape[0] >= box_size and sub.shape[1] >= box_size:
+                        res = cv2.matchTemplate(sub, template_norm, cv2.TM_CCOEFF_NORMED)
+                        _, max_v, _, max_l = cv2.minMaxLoc(res)
+                        if max_v > best_score:
+                            best_score = max_v
+                            best_loc = (sx + max_l[0], sy + max_l[1])
 
-                    # Refine anchor if high confidence and within ±2px
-                    cand_x = sx + max_l[0]
-                    cand_y = sy + max_l[1]
-                    if max_v >= 0.70 and abs(cand_x - best_x) <= 2 and abs(cand_y - best_y) <= 2:
-                        best_x, best_y = cand_x, cand_y
+                cap.release()
+
+                # Clean video has negative or near-zero scores (typically < 0.10)
+                # Any genuine watermark scores >= 0.60 in at least one frame
+                # If best_score remains -1.0 (unreadable), proceed with deterministic anchor
+                if best_score > -0.99 and best_score < 0.30:
+                    logger.info("Video watermark not detected (best_score=%.3f), skipping lossless removal", best_score)
+                    shutil.copyfile(src, dst)
+                    return True
+
+                # Refine anchor if high confidence and within +-2px
+                cand_x, cand_y = best_loc
+                if best_score >= 0.70 and abs(cand_x - best_x) <= 2 and abs(cand_y - best_y) <= 2:
+                    best_x, best_y = cand_x, cand_y
+
         except Exception as exc:
             logger.debug("Video watermark probe failed, using default anchor: %s", exc)
 
@@ -647,6 +660,8 @@ class BatchEngine:
         a = np.clip(template * 0.60, 0.0, 0.95)[:, :, np.newaxis]
         active = a[:, :, 0] > 0
 
+        reader = None
+        writer = None
         try:
             reader = subprocess.Popen(
                 ["ffmpeg", "-i", src, "-f", "rawvideo", "-pix_fmt", "bgr24", "-v", "quiet", "-"],
