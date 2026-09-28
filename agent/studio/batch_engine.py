@@ -493,10 +493,20 @@ class BatchEngine:
             best_x = max(0, min(w - box_size, best_x))
             best_y = max(0, min(h - box_size, best_y))
 
+            # Zero out alpha noise below 0.02 to eliminate rectangle outline artifact
+            # from measurement noise at the border of the calibration grid
+            template[template < 0.02] = 0.0
+
             patch = img[best_y : best_y + box_size, best_x : best_x + box_size].astype(np.float32)
             a = np.clip(template * 0.60, 0.0, 0.95)[:, :, np.newaxis]
-            unblended = (patch - 255.0 * a) / (1.0 - a)
-            unblended = np.clip(unblended, 0, 255).astype(np.uint8)
+
+            # Only unblend pixels where alpha > 0; leave untouched pixels pristine
+            unblended = patch.copy()
+            active = a[:, :, 0] > 0
+            unblended[active] = np.clip(
+                (patch[active] - 255.0 * a[active]) / (1.0 - a[active]), 0, 255
+            )
+            unblended = unblended.astype(np.uint8)
 
             img[best_y : best_y + box_size, best_x : best_x + box_size] = unblended
 
