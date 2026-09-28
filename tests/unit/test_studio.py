@@ -241,4 +241,27 @@ def test_remove_image_watermark_lossless(tmp_path):
     assert abs(int(bg_val[2]) - 140) < 15
 
 
+def test_remove_image_watermark_clean_skipped(tmp_path):
+    """Test that an image without watermark is preserved untouched."""
+    import cv2
+    import numpy as np
+    from agent.studio.batch_engine import BatchEngine
+
+    engine = BatchEngine()
+    # Pristine off-white image without any watermark
+    img = np.full((1024, 1024, 3), (250, 248, 248), dtype=np.uint8)
+
+    src = str(tmp_path / "pristine.jpg")
+    dst = str(tmp_path / "pristine_clean.jpg")
+    cv2.imwrite(src, img)
+
+    success = engine._remove_image_watermark_lossless(src, dst)
+    assert success is True
+    assert Path(dst).exists()
+
+    clean_img = cv2.imread(dst)
+    # Must remain identical without any ghost watermark artifact
+    assert np.array_equal(clean_img, img)
+
+
 

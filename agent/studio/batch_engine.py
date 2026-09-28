@@ -443,38 +443,58 @@ class BatchEngine:
 
             scale_factor = 2 if (h >= 1500 and w >= 1500) else 1
             box_size = 48 * scale_factor
+
+            # Deterministic Google Imagen 3 anchor placement:
+            # Square (1:1): margin 78 + box 48 = 126
+            # Non-square (16:9, 9:16, etc.): margin 73 + box 48 = 121
+            is_square = abs(w - h) < 50
+            offset = (126 if is_square else 121) * scale_factor
+            expected_x = w - offset
+            expected_y = h - offset
+
+            # Check if watermark is already absent (e.g. clean input or solid flat background)
+            patch_chk = img[expected_y : expected_y + box_size, expected_x : expected_x + box_size].astype(float)
+            bg_left = img[expected_y : expected_y + box_size, max(0, expected_x - box_size) : expected_x].astype(float)
+            if patch_chk.shape == bg_left.shape:
+                diff_mean = np.mean(patch_chk) - np.mean(bg_left)
+                patch_std = np.std(patch_chk)
+                if patch_std < 2.5 and abs(diff_mean) < 1.0:
+                    shutil.copyfile(src, dst)
+                    return True
+
             template = (
                 cv2.resize(alpha_48, (box_size, box_size), interpolation=cv2.INTER_LINEAR)
                 if scale_factor != 1
                 else alpha_48.copy()
             )
 
-            expected_x = w - 126 * scale_factor
-            expected_y = h - 126 * scale_factor
+            # Local search within strict +- 2 pixels to refine sub-pixel positioning
+            search_r = 2 * scale_factor
+            roi_x1 = max(0, expected_x - search_r)
+            roi_y1 = max(0, expected_y - search_r)
+            roi_x2 = min(w, expected_x + box_size + search_r)
+            roi_y2 = min(h, expected_y + box_size + search_r)
 
-            # Broad search in bottom-right corner
-            corner_dim = 160 * scale_factor
-            roi_x1 = max(0, w - corner_dim)
-            roi_y1 = max(0, h - corner_dim)
-
-            gray_corner = cv2.cvtColor(img[roi_y1:h, roi_x1:w], cv2.COLOR_BGR2GRAY).astype(np.float32)
+            sub_corner = cv2.cvtColor(img[roi_y1:roi_y2, roi_x1:roi_x2], cv2.COLOR_BGR2GRAY).astype(np.float32)
             template_norm = (template / template.max() * 255.0).astype(np.float32)
 
-            res = cv2.matchTemplate(gray_corner, template_norm, cv2.TM_CCOEFF_NORMED)
+            res = cv2.matchTemplate(sub_corner, template_norm, cv2.TM_CCOEFF_NORMED)
             _, max_v, _, max_l = cv2.minMaxLoc(res)
 
-            if max_v >= 0.18:
-                best_x = roi_x1 + max_l[0]
-                best_y = roi_y1 + max_l[1]
+            cand_x = roi_x1 + max_l[0]
+            cand_y = roi_y1 + max_l[1]
+
+            # Only accept jitter if high confidence (>= 0.70) and within 1 pixel
+            if max_v >= 0.70 and abs(cand_x - expected_x) <= 1 * scale_factor and abs(cand_y - expected_y) <= 1 * scale_factor:
+                best_x, best_y = cand_x, cand_y
             else:
-                best_x = expected_x
-                best_y = expected_y
+                best_x, best_y = expected_x, expected_y
 
             best_x = max(0, min(w - box_size, best_x))
             best_y = max(0, min(h - box_size, best_y))
 
             patch = img[best_y : best_y + box_size, best_x : best_x + box_size].astype(np.float32)
-            a = np.clip(template * 0.64, 0.0, 0.95)[:, :, np.newaxis]
+            a = np.clip(template * 0.60, 0.0, 0.95)[:, :, np.newaxis]
             unblended = (patch - 255.0 * a) / (1.0 - a)
             unblended = np.clip(unblended, 0, 255).astype(np.uint8)
 
