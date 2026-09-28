@@ -62,9 +62,16 @@ Mở một Terminal khác và chạy:
 ```bash
 cd /Users/quyetnguyen/Documents/Me/Flowkit
 source venv/bin/activate
+
+# Cách 1 (Chuẩn của FlowKit):
+python -m agent.main
+
+# Cách 2 (Dùng file main.py ở root):
 python main.py
+
+# Cách 3 (Chạy trực tiếp qua uvicorn):
+uvicorn agent.main:app --host 127.0.0.1 --port 8100 --reload
 ```
-*(Hoặc dùng lệnh: `uvicorn agent.main:app --host 127.0.0.1 --port 8100 --reload`)*
 
 ### Bước 3: Kiểm tra kết nối hệ thống
 Kiểm tra xem backend và extension đã sẵn sàng chưa:
