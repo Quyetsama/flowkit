@@ -116,35 +116,87 @@ async def _flow_page(browser: Any, project_id: str) -> tuple[Any, str]:
     return page, active_pid
 
 
-async def _wait_editor(page: Any) -> None:
-    # Ensure Agent Mode chip is off so standard settings-trigger-button is displayed
-    agent_chip = page.locator(".agent-mode-chip.agent-mode-chip-checked:visible").first
-    if await agent_chip.count():
-        await agent_chip.click()
-        await page.wait_for_timeout(300)
-    await page.locator("button.settings-trigger-button").first.wait_for(
-        state="visible", timeout=20_000
-    )
-    await page.wait_for_timeout(500)
+async def _close_open_drawers(page: Any) -> None:
+    """Close any open session panel, side drawer, or dialog."""
+    # 1. Close buttons (especially header-action in post-generation session panels)
+    close_selectors = [
+        'button.header-action:visible:has(mat-icon:has-text("close"))',
+        'button.header-close-btn:visible',
+        'button[aria-label="Đóng"]:visible',
+        'button[aria-label="Close"]:visible',
+        'button:visible:has(mat-icon:has-text("close"))',
+    ]
+    for sel in close_selectors:
+        btn = page.locator(sel).first
+        if await btn.count() and await btn.is_visible():
+            try:
+                await btn.click()
+                await page.wait_for_timeout(300)
+            except Exception:
+                pass
+            break
+
+    # 2. Back buttons (e.g. arrow_back in nested panels)
+    back = page.locator("button:visible").filter(
+        has=page.locator("mat-icon", has_text="arrow_back")
+    ).first
+    if await back.count() and await back.is_visible():
+        try:
+            await back.click()
+            await page.wait_for_timeout(250)
+        except Exception:
+            pass
+
+
+async def _ensure_agent_mode_off(page: Any) -> None:
+    """Ensure Google Flow's Agent Mode is disabled so standard settings-trigger-button is displayed."""
+    await _close_open_drawers(page)
+
+    agent_chip_selectors = [
+        ".agent-mode-chip.agent-mode-chip-checked:visible",
+        ".agent-mode-chip[aria-selected='true']:visible",
+        ".agent-mode-chip[aria-checked='true']:visible",
+        ".agent-mode-chip.mat-mdc-chip-selected:visible",
+        "mat-chip-option.agent-mode-chip:visible",
+        "mat-chip-row.agent-mode-chip:visible",
+    ]
+    for sel in agent_chip_selectors:
+        chip = page.locator(sel).first
+        if await chip.count() and await chip.is_visible():
+            try:
+                await chip.click()
+                await page.wait_for_timeout(350)
+            except Exception:
+                pass
+            break
+
+    # Check if settings button is still hidden and an agent chip exists
+    btn = page.locator("button.settings-trigger-button").first
+    if await btn.count() and not await btn.is_visible():
+        chip = page.locator('.agent-mode-chip:visible, [class*="agent-mode"]:visible').first
+        if await chip.count() and await chip.is_visible():
+            try:
+                await chip.click()
+                await page.wait_for_timeout(350)
+            except Exception:
+                pass
 
 
 async def _dismiss_overlays(page: Any) -> None:
     cookie = page.locator(".glue-cookie-notification-bar__accept:visible").first
-    if await cookie.count():
-        await cookie.click()
-        await page.wait_for_timeout(250)
-    # Close any open drawer or settings panel (e.g. Agent Settings panel)
-    back = page.locator("button:visible").filter(
-        has=page.locator("mat-icon", has_text="arrow_back")
-    ).first
-    if await back.count():
-        await back.click()
-        await page.wait_for_timeout(250)
+    if await cookie.count() and await cookie.is_visible():
+        try:
+            await cookie.click()
+            await page.wait_for_timeout(250)
+        except Exception:
+            pass
+
+    # Close any open drawer, history, or session view
+    await _close_open_drawers(page)
+
     # Turn off Agent Mode chip if it was toggled on
-    agent_chip = page.locator(".agent-mode-chip.agent-mode-chip-checked:visible").first
-    if await agent_chip.count():
-        await agent_chip.click()
-        await page.wait_for_timeout(300)
+    await _ensure_agent_mode_off(page)
+
     # Escape closes a stale menu/picker left by an interrupted previous run.
     await page.keyboard.press("Escape")
     await page.wait_for_timeout(100)
@@ -152,12 +204,41 @@ async def _dismiss_overlays(page: Any) -> None:
     await page.wait_for_timeout(100)
 
 
-async def _open_settings(page: Any) -> Any:
-    agent_chip = page.locator(".agent-mode-chip.agent-mode-chip-checked:visible").first
-    if await agent_chip.count():
-        await agent_chip.click()
+async def _wait_editor(page: Any) -> None:
+    await _dismiss_overlays(page)
+
+    # Check if visible settings-trigger-button is immediately available
+    settings = page.locator("button.settings-trigger-button:visible").first
+    try:
+        await settings.wait_for(state="visible", timeout=3_000)
         await page.wait_for_timeout(300)
-    settings = page.locator("button.settings-trigger-button").first
+        return
+    except Exception:
+        pass
+
+    # If hidden or absent, re-attempt closing drawers and toggling off agent mode
+    await _close_open_drawers(page)
+    await _ensure_agent_mode_off(page)
+
+    btn = page.locator("button.settings-trigger-button").first
+    if await btn.count() and not await btn.is_visible():
+        chip = page.locator('.agent-mode-chip:visible').first
+        if await chip.count() and await chip.is_visible():
+            try:
+                await chip.click()
+                await page.wait_for_timeout(400)
+            except Exception:
+                pass
+
+    await page.locator("button.settings-trigger-button:visible").first.wait_for(
+        state="visible", timeout=20_000
+    )
+    await page.wait_for_timeout(500)
+
+
+async def _open_settings(page: Any) -> Any:
+    await _ensure_agent_mode_off(page)
+    settings = page.locator("button.settings-trigger-button:visible").first
     await settings.wait_for(state="visible", timeout=10_000)
     radios = page.locator('button[role="radio"]:visible')
     if await radios.count() == 0:
@@ -339,6 +420,11 @@ async def _set_prompt(page: Any, prompt: str) -> None:
     if not await editor.count():
         editor = page.locator("textarea:visible").first
     await editor.wait_for(state="visible", timeout=8_000)
+    try:
+        if await editor.evaluate("e => e.isContentEditable"):
+            await editor.evaluate("e => { e.innerText = ''; }")
+    except Exception:
+        pass
     await editor.fill(prompt)
     await page.wait_for_timeout(400)
     current = (await editor.inner_text()).strip() if await editor.evaluate("e=>e.isContentEditable") else (await editor.input_value()).strip()

@@ -31,6 +31,36 @@ async def test_generation_rpc_is_globally_serialized(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_generation_rpc_concurrent_across_different_endpoints(monkeypatch):
+    monkeypatch.setattr(fc, "FLOW_GENERATION_MAX_CONCURRENT", 1)
+    monkeypatch.setattr(fc, "FLOW_GENERATION_MIN_INTERVAL_S", 0.0)
+    client = fc.FlowClient()
+    active = 0
+    max_active = 0
+
+    async def fake_run(*args, **kwargs):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return {"status": 200, "data": "ok"}
+
+    monkeypatch.setattr(fc, "run_flow_ui_generation", fake_run)
+    await asyncio.gather(
+        client.batch_rpc(
+            fb.RPC_GEN_VIDEO_TEXT, "x", captcha_action=fb.CAPTCHA_VIDEO,
+            cdp_endpoint="http://127.0.0.1:9224",
+        ),
+        client.batch_rpc(
+            fb.RPC_GEN_IMAGE, "y", captcha_action=fb.CAPTCHA_IMAGE,
+            cdp_endpoint="http://127.0.0.1:9225",
+        ),
+    )
+    assert max_active == 2
+
+
+@pytest.mark.asyncio
 async def test_unusual_activity_opens_local_circuit_breaker(monkeypatch):
     monkeypatch.setattr(fc, "FLOW_GENERATION_MAX_CONCURRENT", 1)
     monkeypatch.setattr(fc, "FLOW_GENERATION_MIN_INTERVAL_S", 0.0)

@@ -245,7 +245,7 @@ async def generate_omni_flash_text_video(
 
     client = get_flow_client()
     try:
-        pid = client._batch_project_id(project_id)
+        pid = client._batch_project_id(project_id, cdp_endpoint=cdp_endpoint)
         model_key = f"abra_t2v_{duration_s}s" + ("_360p" if resolution == "360p" else "")
         freq = fb.text_video_request(
             prompt,

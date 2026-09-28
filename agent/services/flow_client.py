@@ -17,6 +17,7 @@ parsers, the operation poller, the scene/character updaters — is transport-bli
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from typing import Optional
@@ -53,6 +54,17 @@ IMAGE_TRANSIENT_RETRY_DELAY_S = 34.0
 IMAGE_TRANSIENT_MAX_ATTEMPTS = 2
 
 
+class _EndpointGenerationState:
+    def __init__(self, concurrency: int = 1):
+        self.slots = asyncio.Semaphore(concurrency)
+        self.rate_gate = asyncio.Lock()
+        self.last_submit_at = 0.0
+        self.unusual_until = 0.0
+        self.last_unusual_at: float | None = None
+        self.last_unusual_rpc: str | None = None
+        self.active_project: str | None = None
+
+
 class FlowClient:
     """Sends commands to Chrome extension via WebSocket."""
 
@@ -80,6 +92,7 @@ class FlowClient:
         self._generation_unusual_until = 0.0
         self._generation_last_unusual_at: Optional[float] = None
         self._generation_last_unusual_rpc: Optional[str] = None
+        self._endpoint_states: dict[str, _EndpointGenerationState] = {}
         # WS stats
         self._ws_connect_count = 0
         self._ws_disconnect_count = 0
@@ -542,6 +555,17 @@ class FlowClient:
     # None of that can be replayed from here, so the agent builds the envelope
     # and the extension runs it inside a signed-in flow.google.com tab.
 
+    def _get_endpoint_state(self, cdp_endpoint: str | None = None) -> _EndpointGenerationState:
+        default_ep = os.environ.get("FLOW_CHROME_CDP", "http://127.0.0.1:9224").rstrip("/")
+        ep = (cdp_endpoint or default_ep).rstrip("/")
+        if ep not in self._endpoint_states:
+            state = _EndpointGenerationState(concurrency=FLOW_GENERATION_MAX_CONCURRENT)
+            if ep == default_ep:
+                state.slots = self._generation_slots
+                state.rate_gate = self._generation_rate_gate
+            self._endpoint_states[ep] = state
+        return self._endpoint_states[ep]
+
     async def batch_rpc(self, rpcid: str, freq: str,
                         captcha_action: str | None = None,
                         match: str | None = None,
@@ -567,7 +591,8 @@ class FlowClient:
             fb.RPC_GEN_VIDEO_REFERENCES,
         }
         is_generation = rpcid in generation_rpcs
-        eff_project_id = project_id or self._batch_active_project or FLOW_PROJECT_ID or None
+        state = self._get_endpoint_state(cdp_endpoint)
+        eff_project_id = project_id or state.active_project or (self._batch_active_project if not cdp_endpoint else None) or FLOW_PROJECT_ID or None
         if not is_generation:
             return await run_flow_batch_rpc(
                 rpcid,
@@ -580,8 +605,8 @@ class FlowClient:
             )
 
         now = time.monotonic()
-        if now < self._generation_unusual_until:
-            remaining = max(1, int(self._generation_unusual_until - now + 0.999))
+        if now < state.unusual_until:
+            remaining = max(1, int(state.unusual_until - now + 0.999))
             return {
                 "status": 429,
                 "error": (
@@ -590,15 +615,15 @@ class FlowClient:
                 ),
             }
 
-        await self._generation_slots.acquire()
+        await state.slots.acquire()
         try:
             # Serialize the launch gate even if the configured concurrency is
             # raised later. This spaces CAPTCHA mints / generation dispatches
             # while still allowing already-submitted backend jobs to run.
-            async with self._generation_rate_gate:
+            async with state.rate_gate:
                 now = time.monotonic()
-                if now < self._generation_unusual_until:
-                    remaining = max(1, int(self._generation_unusual_until - now + 0.999))
+                if now < state.unusual_until:
+                    remaining = max(1, int(state.unusual_until - now + 0.999))
                     return {
                         "status": 429,
                         "error": (
@@ -606,10 +631,12 @@ class FlowClient:
                             f"retry in about {remaining}s"
                         ),
                     }
-                delay = FLOW_GENERATION_MIN_INTERVAL_S - (now - self._generation_last_submit_at)
+                delay = FLOW_GENERATION_MIN_INTERVAL_S - (now - state.last_submit_at)
                 if delay > 0:
                     await asyncio.sleep(delay)
-                self._generation_last_submit_at = time.monotonic()
+                state.last_submit_at = time.monotonic()
+                if not cdp_endpoint:
+                    self._generation_last_submit_at = state.last_submit_at
 
             result = await run_flow_ui_generation(
                 rpcid,
@@ -623,19 +650,24 @@ class FlowClient:
                 "PUBLIC_ERROR_UNUSUAL_ACTIVITY" in blob
                 or "unusual activity" in blob.lower()
             ):
-                self._generation_unusual_until = max(
-                    self._generation_unusual_until,
+                state.unusual_until = max(
+                    state.unusual_until,
                     time.monotonic() + FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
                 )
-                self._generation_last_unusual_at = time.time()
-                self._generation_last_unusual_rpc = rpcid
+                state.last_unusual_at = time.time()
+                state.last_unusual_rpc = rpcid
+                if not cdp_endpoint:
+                    self._generation_unusual_until = state.unusual_until
+                    self._generation_last_unusual_at = state.last_unusual_at
+                    self._generation_last_unusual_rpc = state.last_unusual_rpc
                 logger.warning(
-                    "Google unusual-activity block detected; pausing generation submits for %.0fs",
+                    "Google unusual-activity block detected on %s; pausing generation submits for %.0fs",
+                    cdp_endpoint or "default endpoint",
                     FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
                 )
             return result
         finally:
-            self._generation_slots.release()
+            state.slots.release()
 
     async def _batch_payload(self, rpcid: str, freq: str,
                              captcha_action: str | None = None,
@@ -660,20 +692,25 @@ class FlowClient:
             raise fb.FlowBatchError(f"{rpcid}: {result['error']}")
         return fb.first_payload(result.get("data") or "", rpcid)
 
-    def _batch_project_id(self, project_id: str) -> str:
+    def _batch_project_id(self, project_id: str, cdp_endpoint: str | None = None) -> str:
         """The Flow project an RPC is scoped to.
 
         Flow Kit stores the Flow project uuid as the local project id. Public
         direct endpoints resolve project-less work through the persistent
         session-project lease before reaching this lower-level helper.
         """
+        state = self._get_endpoint_state(cdp_endpoint)
         if project_id and self._UUID_RE.match(str(project_id)):
             resolved = str(project_id)
+            state.active_project = resolved
             self._batch_active_project = resolved
             return resolved
-        if self._batch_active_project and self._UUID_RE.match(self._batch_active_project):
+        if state.active_project and self._UUID_RE.match(state.active_project):
+            return state.active_project
+        if not cdp_endpoint and self._batch_active_project and self._UUID_RE.match(self._batch_active_project):
             return self._batch_active_project
         if FLOW_PROJECT_ID:
+            state.active_project = FLOW_PROJECT_ID
             self._batch_active_project = FLOW_PROJECT_ID
             return FLOW_PROJECT_ID
         raise fb.FlowBatchError(
@@ -760,7 +797,7 @@ class FlowClient:
         try:
             if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 4:
                 raise ValueError("image count must be an integer from 1 to 4")
-            pid = self._batch_project_id(project_id)
+            pid = self._batch_project_id(project_id, cdp_endpoint=cdp_endpoint)
             model = self._batch_image_model(image_model)
             refs = list(character_media_ids or []) or None
 
