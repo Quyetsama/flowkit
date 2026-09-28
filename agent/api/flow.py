@@ -557,7 +557,12 @@ async def get_media(media_id: str):
     status = result.get("status", 200)
     if isinstance(status, int) and status >= 400:
         raise HTTPException(status, result.get("data", "Media not found"))
-    return result.get("data", result)
+    data = result.get("data", result)
+    if isinstance(data, dict):
+        video_url = data.get("video", {}).get("fifeUrl") if isinstance(data.get("video"), dict) else None
+        image_url = data.get("image", {}).get("fifeUrl") if isinstance(data.get("image"), dict) else None
+        data.setdefault("url", video_url or image_url)
+    return data
 
 
 @router.post("/edit-image")

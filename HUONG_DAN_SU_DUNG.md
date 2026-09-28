@@ -171,7 +171,8 @@ Video Google Flow thường mất khoảng **1 – 3 phút** để render xong.
 #### Cách 1: Kiểm tra trực tiếp qua Media ID (Đơn giản nhất)
 ```bash
 # Kiểm tra xem video đã có URL tải về chưa (khi chưa xong sẽ trả về null)
-curl -s http://127.0.0.1:8100/api/flow/media/852bbb90-77dd-4538-a430-5edbb17586d8 | jq -r .url
+# Google Flow trả về trường .video.fifeUrl; FlowKit hỗ trợ alias cả .url:
+curl -s http://127.0.0.1:8100/api/flow/media/<MEDIA_ID> | jq -r '.url // .video.fifeUrl'
 ```
 
 #### Cách 2: Kiểm tra qua API `check-status`
@@ -179,11 +180,11 @@ curl -s http://127.0.0.1:8100/api/flow/media/852bbb90-77dd-4538-a430-5edbb17586d
 curl -s -X POST http://127.0.0.1:8100/api/flow/check-status \
   -H "Content-Type: application/json" \
   -d '{
-    "project_id": "5ee5271c-c32e-464d-8c5f-df2a2cff715e",
+    "project_id": "<PROJECT_ID>",
     "workflows": [
       {
-        "name": "0cbc972a-1253-4e9e-8070-b5267001d803",
-        "primary_media_id": "852bbb90-77dd-4538-a430-5edbb17586d8"
+        "name": "<WORKFLOW_NAME>",
+        "primary_media_id": "<MEDIA_ID>"
       }
     ]
   }' | jq .
@@ -196,8 +197,8 @@ curl -s -X POST http://127.0.0.1:8100/api/flow/check-status \
 Khi lệnh kiểm tra trả về một URL (bắt đầu bằng `https://...`), chạy lệnh sau để tự động lấy URL và tải video:
 
 ```bash
-MEDIA_ID="852bbb90-77dd-4538-a430-5edbb17586d8"
-URL=$(curl -s "http://127.0.0.1:8100/api/flow/media/${MEDIA_ID}" | jq -r .url)
+MEDIA_ID="<MEDIA_ID>"
+URL=$(curl -s "http://127.0.0.1:8100/api/flow/media/${MEDIA_ID}" | jq -r '.url // .video.fifeUrl')
 
 # Tải về file video
 curl -L -o "my_video.mp4" "$URL"
