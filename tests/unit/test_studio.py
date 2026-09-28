@@ -264,4 +264,61 @@ def test_remove_image_watermark_clean_skipped(tmp_path):
     assert np.array_equal(clean_img, img)
 
 
+def test_remove_video_watermark_lossless(tmp_path):
+    """Test video watermark removal using reverse alpha blending."""
+    import cv2
+    import numpy as np
+    from agent.studio.batch_engine import BatchEngine, load_watermark_alpha_48
+
+    engine = BatchEngine()
+    alpha = load_watermark_alpha_48()
+    assert alpha is not None
+
+    w, h = 1280, 720
+    fps = 24.0
+    src = str(tmp_path / "synthetic_vid.mp4")
+    dst = str(tmp_path / "synthetic_vid_clean.mp4")
+
+    # Create a small 5-frame 1280x720 video
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(src, fourcc, fps, (w, h))
+
+    cx = w - 144
+    cy = h - 144
+    a = (alpha * 0.60)[:, :, np.newaxis]
+
+    for _ in range(5):
+        frame = np.full((h, w, 3), (120, 170, 140), dtype=np.uint8)
+        cv2.line(frame, (cx - 10, cy - 10), (cx + 58, cy + 58), (0, 0, 0), 3)
+        patch = frame[cy : cy + 48, cx : cx + 48].astype(np.float32)
+        frame[cy : cy + 48, cx : cx + 48] = np.clip(patch * (1.0 - a) + 255.0 * a, 0, 255).astype(np.uint8)
+        writer.write(frame)
+    writer.release()
+
+    success = engine._remove_video_watermark_lossless(src, dst)
+    assert success is True
+    assert Path(dst).exists()
+    assert Path(dst).stat().st_size > 0
+
+    cap = cv2.VideoCapture(dst)
+    assert cap.isOpened()
+    ret, clean_frame = cap.read()
+    cap.release()
+    assert ret is True
+    assert clean_frame.shape == (h, w, 3)
+
+    # 1. Line pixel is preserved as sharp black
+    line_val = clean_frame[cy + 10, cx + 10]
+    assert int(line_val[0]) < 15
+    assert int(line_val[1]) < 15
+    assert int(line_val[2]) < 15
+
+    # 2. Background pixel is restored near (120, 170, 140)
+    bg_val = clean_frame[cy + 30, cx + 10]
+    assert abs(int(bg_val[0]) - 120) < 20
+    assert abs(int(bg_val[1]) - 170) < 20
+    assert abs(int(bg_val[2]) - 140) < 20
+
+
+
 

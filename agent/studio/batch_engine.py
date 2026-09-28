@@ -548,6 +548,169 @@ class BatchEngine:
             logger.debug("Failed to probe dimensions for %s: %s", file_path, exc)
         return None
 
+    def _remove_video_watermark_lossless(self, src: str, dst: str) -> bool:
+        """Remove watermark from video using frame-by-frame reverse alpha blending via FFmpeg pipe."""
+        try:
+            import numpy as np
+        except ImportError:
+            return False
+
+        alpha_48 = load_watermark_alpha_48()
+        if alpha_48 is None:
+            return False
+
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            return False
+
+        # Get video dimensions and fps
+        dims = self._get_media_dimensions(src)
+        if not dims:
+            return False
+        width, height = dims
+
+        try:
+            probe_cmd = [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_streams", "-select_streams", "v:0", src,
+            ]
+            probe_res = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
+            if probe_res.returncode != 0:
+                return False
+            vstream = json.loads(probe_res.stdout)["streams"][0]
+            fps_str = vstream.get("r_frame_rate", "24/1")
+        except Exception:
+            fps_str = "24/1"
+
+        # Prepare alpha template (threshold noise, same as image method)
+        template = alpha_48.copy()
+        template[template < 0.02] = 0.0
+
+        # Determine watermark anchor based on resolution
+        # Empirically calibrated: 1280x720 → offset 144 from bottom-right
+        # Scale proportionally for other resolutions
+        is_square = abs(width - height) < 50
+        if is_square:
+            offset = 126
+        elif width == 1280 and height == 720:
+            offset = 144
+        else:
+            # Proportional scaling from 1280x720 baseline (offset 144)
+            scale = max(width, height) / 1280.0
+            offset = round(144 * scale)
+
+        box_size = 48
+        best_x = max(0, min(width - box_size, width - offset))
+        best_y = max(0, min(height - box_size, height - offset))
+
+        # Verify watermark presence on first frame via template matching
+        try:
+            import cv2
+
+            probe_frame_cmd = [
+                "ffmpeg", "-i", src, "-frames:v", "1",
+                "-f", "rawvideo", "-pix_fmt", "bgr24", "-v", "quiet", "-",
+            ]
+            probe_frame = subprocess.run(probe_frame_cmd, capture_output=True, timeout=10)
+            if probe_frame.returncode == 0 and len(probe_frame.stdout) == width * height * 3:
+                frame0 = np.frombuffer(probe_frame.stdout, dtype=np.uint8).reshape((height, width, 3))
+                gray = cv2.cvtColor(frame0, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                template_norm = (template / max(template.max(), 1e-6) * 255.0).astype(np.float32)
+
+                search_r = 4
+                sy = max(0, best_y - search_r)
+                sx = max(0, best_x - search_r)
+                ey = min(height, best_y + box_size + search_r)
+                ex = min(width, best_x + box_size + search_r)
+                sub = gray[sy:ey, sx:ex]
+
+                if sub.shape[0] >= box_size and sub.shape[1] >= box_size:
+                    res = cv2.matchTemplate(sub, template_norm, cv2.TM_CCOEFF_NORMED)
+                    _, max_v, _, max_l = cv2.minMaxLoc(res)
+
+                    if max_v < 0.50:
+                        logger.info("Video watermark not detected (score=%.3f), skipping lossless removal", max_v)
+                        shutil.copyfile(src, dst)
+                        return True
+
+                    # Refine anchor if high confidence and within ±2px
+                    cand_x = sx + max_l[0]
+                    cand_y = sy + max_l[1]
+                    if max_v >= 0.70 and abs(cand_x - best_x) <= 2 and abs(cand_y - best_y) <= 2:
+                        best_x, best_y = cand_x, cand_y
+        except Exception as exc:
+            logger.debug("Video watermark probe failed, using default anchor: %s", exc)
+
+        best_x = max(0, min(width - box_size, best_x))
+        best_y = max(0, min(height - box_size, best_y))
+
+        # Pre-compute alpha mask
+        a = np.clip(template * 0.60, 0.0, 0.95)[:, :, np.newaxis]
+        active = a[:, :, 0] > 0
+
+        try:
+            reader = subprocess.Popen(
+                ["ffmpeg", "-i", src, "-f", "rawvideo", "-pix_fmt", "bgr24", "-v", "quiet", "-"],
+                stdout=subprocess.PIPE,
+            )
+            writer = subprocess.Popen(
+                [
+                    "ffmpeg", "-y",
+                    "-f", "rawvideo", "-pix_fmt", "bgr24",
+                    "-s", f"{width}x{height}", "-r", fps_str,
+                    "-i", "-",
+                    "-i", src,
+                    "-map", "0:v", "-map", "1:a?",
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                    "-c:a", "copy",
+                    "-v", "quiet",
+                    dst,
+                ],
+                stdin=subprocess.PIPE,
+            )
+
+            frame_size = width * height * 3
+            frame_count = 0
+
+            while True:
+                raw = reader.stdout.read(frame_size)
+                if len(raw) < frame_size:
+                    break
+
+                frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3)).copy()
+                patch = frame[best_y : best_y + box_size, best_x : best_x + box_size].astype(np.float32)
+                unblended = patch.copy()
+                unblended[active] = np.clip(
+                    (patch[active] - 255.0 * a[active]) / (1.0 - a[active]), 0, 255
+                )
+                frame[best_y : best_y + box_size, best_x : best_x + box_size] = unblended.astype(np.uint8)
+                writer.stdin.write(frame.tobytes())
+                frame_count += 1
+
+            writer.stdin.close()
+            reader.stdout.close()
+            writer.wait(timeout=30)
+            reader.wait(timeout=10)
+
+            if writer.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
+                logger.info("Video watermark removed (lossless, %d frames)", frame_count)
+                return True
+            else:
+                logger.warning("Video lossless delogo writer failed (rc=%s)", writer.returncode)
+                if os.path.exists(dst):
+                    os.remove(dst)
+                return False
+
+        except Exception as exc:
+            logger.warning("Video lossless watermark removal failed: %s", exc)
+            for p in [reader, writer]:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+            if os.path.exists(dst):
+                os.remove(dst)
+            return False
+
     def _get_delogo_filter(self, width: int, height: int, is_video: bool = True) -> str:
         """Calculate delogo filter parameters matching Google watermark placement."""
         if is_video:
@@ -587,6 +750,10 @@ class BatchEngine:
             if self._remove_image_watermark_lossless(src, dst):
                 return True
             logger.info("Reverse alpha blending skipped, falling back to FFmpeg delogo")
+        else:
+            if self._remove_video_watermark_lossless(src, dst):
+                return True
+            logger.info("Video lossless removal skipped, falling back to FFmpeg delogo")
 
         dims = self._get_media_dimensions(src)
         if dims:
