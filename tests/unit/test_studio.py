@@ -122,3 +122,77 @@ async def test_batch_engine_profile_isolation(monkeypatch, tmp_path):
     assert kwargs["cdp_endpoint"] == "http://127.0.0.1:9225"
     assert kwargs["project_id"] == "pid-profile-2-uuid"
 
+
+def test_delogo_filter_calculation():
+    engine = BatchEngine()
+    # 720p 16:9 video
+    assert engine._get_delogo_filter(1280, 720, is_video=True) == "delogo=x=1130:y=575:w=65:h=65"
+    # 1080p 16:9 video
+    assert engine._get_delogo_filter(1920, 1080, is_video=True) == "delogo=x=1700:y=865:w=95:h=95"
+    # 720x1280 9:16 vertical video
+    assert engine._get_delogo_filter(720, 1280, is_video=True) == "delogo=x=570:y=1135:w=65:h=65"
+    # 1024x1024 image
+    assert engine._get_delogo_filter(1024, 1024, is_video=False) == "delogo=x=899:y=899:w=72:h=72"
+    # Bound clamping (small image)
+    filt = engine._get_delogo_filter(60, 60, is_video=False)
+    assert "w=50:h=50" in filt
+    assert "x=0" in filt and "y=0" in filt
+
+
+@pytest.mark.asyncio
+async def test_batch_engine_image_delogo(monkeypatch, tmp_path):
+    """Verify image task with auto_delogo=True invokes delogo and sets clean_file_path."""
+    import agent.studio.batch_engine as engine_module
+    from agent.studio.models import BatchTask
+
+    delogo_calls = []
+
+    def fake_delogo(src, dst, is_video=True):
+        delogo_calls.append((src, dst, is_video))
+        return True
+
+    engine = BatchEngine()
+    engine.is_running = True
+    monkeypatch.setattr(engine, "_run_delogo", fake_delogo)
+    monkeypatch.setattr(engine, "_download_file", lambda url, path: None)
+
+    async def fake_images(**kwargs):
+        return {
+            "media": [{"name": "fake-img-1", "fifeUrl": "http://example.com/img.jpg"}],
+        }
+
+    fake_client = engine_module.get_flow_client()
+    monkeypatch.setattr(fake_client, "generate_images", fake_images)
+
+    config = BatchJobConfig(prompts=["test image prompt"], task_type="image", output_dir=str(tmp_path), auto_delogo=True)
+
+    profile = ProfileConfig(
+        id="profile_1",
+        name="Profile 1",
+        cdp_port=9224,
+        user_data_dir=str(tmp_path / "p1"),
+        active_project_id="pid-p1",
+    )
+
+    queue = engine_module.asyncio.Queue()
+    task = BatchTask(
+        index=1,
+        prompt="test image prompt",
+        task_type="image",
+        output_filename="001_test.jpg",
+        file_path=str(tmp_path / "001_test.jpg"),
+        auto_delogo=True,
+    )
+    queue.put_nowait(task)
+
+    await engine._profile_worker(profile, queue, config)
+
+    assert len(delogo_calls) == 1
+    src, dst, is_video = delogo_calls[0]
+    assert src == str(tmp_path / "001_test.jpg")
+    assert dst == str(tmp_path / "001_test_clean.jpg")
+    assert is_video is False
+    assert task.clean_file_path == str(tmp_path / "001_test_clean.jpg")
+    assert task.status == "completed"
+
+

@@ -359,15 +359,16 @@ class BatchEngine:
                 await asyncio.to_thread(self._download_file, download_url, task.file_path)
 
                 # 4. Optional Post-Processing (Delogo)
-                if task.auto_delogo and task.task_type == "video" and shutil.which("ffmpeg"):
+                if task.auto_delogo and shutil.which("ffmpeg"):
                     task.status = "delogo"
                     task.progress_percent = 90
                     await self.emit_event("task_updated", task.model_dump())
 
-                    clean_file = str(Path(task.file_path).with_name(
-                        Path(task.file_path).stem + "_clean.mp4"
-                    ))
-                    success = await asyncio.to_thread(self._run_delogo, task.file_path, clean_file)
+                    orig_path = Path(task.file_path)
+                    ext = orig_path.suffix or (".mp4" if task.task_type == "video" else ".jpg")
+                    clean_file = str(orig_path.with_name(f"{orig_path.stem}_clean{ext}"))
+                    is_video = (task.task_type == "video")
+                    success = await asyncio.to_thread(self._run_delogo, task.file_path, clean_file, is_video)
                     if success:
                         task.clean_file_path = clean_file
 
@@ -407,24 +408,104 @@ class BatchEngine:
         with urllib.request.urlopen(req, timeout=60) as resp, open(target_path, "wb") as out:
             shutil.copyfileobj(resp, out)
 
-    def _run_delogo(self, src: str, dst: str) -> bool:
-        """Execute FFmpeg delogo to remove bottom-right Google watermark."""
+    def _get_media_dimensions(self, file_path: str) -> tuple[int, int] | None:
+        """Extract width and height using ffprobe if available."""
+        if not shutil.which("ffprobe"):
+            return None
         cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            src,
-            "-vf",
-            "delogo=x=1130:y=575:w=65:h=65",
-            "-c:a",
-            "copy",
-            dst,
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=s=x:p=0",
+            file_path,
         ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if res.returncode == 0 and res.stdout.strip():
+                parts = res.stdout.strip().split("x")
+                if len(parts) >= 2:
+                    return int(parts[0]), int(parts[1])
+        except Exception as exc:
+            logger.debug("Failed to probe dimensions for %s: %s", file_path, exc)
+        return None
+
+    def _get_delogo_filter(self, width: int, height: int, is_video: bool = True) -> str:
+        """Calculate delogo filter parameters matching Google watermark placement."""
+        if is_video:
+            max_dim = max(width, height)
+            if max_dim >= 1800:
+                w, h = 95, 95
+                offset_x, offset_y = 220, 215
+            elif max_dim >= 1100:
+                w, h = 65, 65
+                offset_x, offset_y = 150, 145
+            else:
+                w, h = 45, 45
+                offset_x, offset_y = 90, 85
+        else:
+            min_dim = min(width, height)
+            if min_dim >= 1500:
+                w, h = 100, 100
+                offset_x, offset_y = 175, 175
+            elif min_dim >= 700:
+                w, h = 72, 72
+                offset_x, offset_y = 125, 125
+            else:
+                w, h = 50, 50
+                offset_x, offset_y = 90, 90
+
+        x = max(0, min(width - w, width - offset_x))
+        y = max(0, min(height - h, height - offset_y))
+        return f"delogo=x={x}:y={y}:w={w}:h={h}"
+
+    def _run_delogo(self, src: str, dst: str, is_video: bool = True) -> bool:
+        """Execute FFmpeg delogo to remove bottom-right Google watermark."""
+        if not os.path.exists(src):
+            logger.warning("Source file not found for delogo: %s", src)
+            return False
+
+        dims = self._get_media_dimensions(src)
+        if dims:
+            width, height = dims
+        else:
+            width, height = (1280, 720) if is_video else (1024, 1024)
+
+        delogo_vf = self._get_delogo_filter(width, height, is_video=is_video)
+
+        if is_video:
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                src,
+                "-vf",
+                delogo_vf,
+                "-c:a",
+                "copy",
+                dst,
+            ]
+        else:
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                src,
+                "-vf",
+                delogo_vf,
+                "-q:v",
+                "2",
+                dst,
+            ]
         try:
             res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
             return res.returncode == 0 and os.path.exists(dst)
         except Exception as exc:
-            logger.warning("FFmpeg delogo failed: %s", exc)
+            logger.warning("FFmpeg delogo failed for %s: %s", src, exc)
             return False
 
     def _save_results(self) -> None:
