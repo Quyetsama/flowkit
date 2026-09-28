@@ -168,21 +168,23 @@ class ProfileManager:
             profile.is_connected = True
             profile.error_message = None
 
-            # Look for flow tab
-            flow_tab = None
+            # Look for flow tab with active project
             active_pid = None
             for t in tabs:
+                if t.get("type") != "page":
+                    continue
                 u = str(t.get("url") or "")
-                if "flow.google.com" in u or "labs.google/fx" in u:
-                    flow_tab = t
-                    if "/project/" in u:
-                        parts = u.split("/project/")
-                        if len(parts) > 1:
-                            active_pid = parts[1].split("?")[0].split("/")[0].strip()
-                    break
+                if ("flow.google.com" in u or "labs.google/fx" in u) and "/project/" in u:
+                    parts = u.split("/project/")
+                    if len(parts) > 1:
+                        cand = parts[1].split("?")[0].split("/")[0].strip()
+                        if cand and cand != "404":
+                            active_pid = cand
+                            break
 
             if active_pid:
                 profile.active_project_id = active_pid
+                self.save()
 
         except Exception as exc:
             profile.is_running = False

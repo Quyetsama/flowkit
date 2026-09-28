@@ -232,6 +232,7 @@ async def generate_omni_flash_text_video(
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
+    cdp_endpoint: str | None = None,
 ) -> dict:
     """Submit Omni 1.1 Flash text-to-video on the migrated Flow batch API."""
     _validate_duration(duration_s)
@@ -258,6 +259,8 @@ async def generate_omni_flash_text_video(
             freq,
             fb.CAPTCHA_VIDEO,
             timeout=120,
+            project_id=pid,
+            cdp_endpoint=cdp_endpoint,
         )
         submitted = fb.read_text_video_submit(payload)
     except Exception as exc:
@@ -298,6 +301,7 @@ async def _submit_omni_frame_video(
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
+    cdp_endpoint: str | None = None,
 ) -> dict:
     """Submit Omni first-frame or First+Last generation.
 
@@ -332,6 +336,7 @@ async def _submit_omni_frame_video(
                 )
             payload = await client._batch_payload(
                 rpcid, freq, fb.CAPTCHA_VIDEO, timeout=120,
+                project_id=pid, cdp_endpoint=cdp_endpoint,
             )
             operation = fb.read_operation(payload)
             client._remember_operation(operation.operation_id, pid)
@@ -382,6 +387,7 @@ async def generate_omni_flash_first_frame_video(
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
+    cdp_endpoint: str | None = None,
 ) -> dict:
     """Submit Omni Flash First frame -> video."""
     return await _submit_omni_frame_video(
@@ -395,6 +401,7 @@ async def generate_omni_flash_first_frame_video(
         aspect_ratio=aspect_ratio,
         user_paygate_tier=user_paygate_tier,
         seed=seed,
+        cdp_endpoint=cdp_endpoint,
     )
 
 
@@ -409,6 +416,7 @@ async def generate_omni_flash_first_last_video(
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
+    cdp_endpoint: str | None = None,
 ) -> dict:
     """Submit Omni Flash First + Last frame -> video."""
     return await _submit_omni_frame_video(
@@ -422,6 +430,7 @@ async def generate_omni_flash_first_last_video(
         aspect_ratio=aspect_ratio,
         user_paygate_tier=user_paygate_tier,
         seed=seed,
+        cdp_endpoint=cdp_endpoint,
     )
 
 
@@ -435,6 +444,7 @@ async def generate_omni_flash_video(
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
+    cdp_endpoint: str | None = None,
 ) -> dict:
     """Submit Omni Flash Ingredients/reference-to-video generation.
 
@@ -455,6 +465,7 @@ async def generate_omni_flash_video(
             )
             payload = await client._batch_payload(
                 fb.RPC_GEN_VIDEO_REFERENCES, freq, fb.CAPTCHA_VIDEO, timeout=120,
+                project_id=pid, cdp_endpoint=cdp_endpoint,
             )
             operation = fb.read_operation(payload)
             client._remember_operation(operation.operation_id, pid)

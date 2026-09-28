@@ -545,7 +545,9 @@ class FlowClient:
     async def batch_rpc(self, rpcid: str, freq: str,
                         captcha_action: str | None = None,
                         match: str | None = None,
-                        timeout: float = 300) -> dict:
+                        timeout: float = 300,
+                        project_id: str | None = None,
+                        cdp_endpoint: str | None = None) -> dict:
         """Run one batchexecute RPC in the Flow page. Returns the raw body.
 
         ``match`` asks the extension to cut the response down to an 800-byte
@@ -565,14 +567,16 @@ class FlowClient:
             fb.RPC_GEN_VIDEO_REFERENCES,
         }
         is_generation = rpcid in generation_rpcs
+        eff_project_id = project_id or self._batch_active_project or FLOW_PROJECT_ID or None
         if not is_generation:
             return await run_flow_batch_rpc(
                 rpcid,
                 freq,
                 captcha_action=captcha_action,
                 match=match,
-                project_id=self._batch_active_project or FLOW_PROJECT_ID or None,
+                project_id=eff_project_id,
                 timeout=timeout,
+                cdp_endpoint=cdp_endpoint,
             )
 
         now = time.monotonic()
@@ -610,8 +614,9 @@ class FlowClient:
             result = await run_flow_ui_generation(
                 rpcid,
                 freq,
-                project_id=self._batch_active_project or FLOW_PROJECT_ID or None,
+                project_id=eff_project_id,
                 timeout=timeout,
+                cdp_endpoint=cdp_endpoint,
             )
             blob = f"{result.get('error', '')} {result.get('data', '')}"
             if (
@@ -634,9 +639,23 @@ class FlowClient:
 
     async def _batch_payload(self, rpcid: str, freq: str,
                              captcha_action: str | None = None,
-                             timeout: float = 300):
+                             timeout: float = 300,
+                             project_id: str | None = None,
+                             cdp_endpoint: str | None = None):
         """One RPC, unwrapped to its inner payload. Raises on anything else."""
-        result = await self.batch_rpc(rpcid, freq, captcha_action, timeout=timeout)
+        kwargs: dict[str, Any] = {"timeout": timeout}
+        if project_id is not None:
+            kwargs["project_id"] = project_id
+        if cdp_endpoint is not None:
+            kwargs["cdp_endpoint"] = cdp_endpoint
+        try:
+            result = await self.batch_rpc(
+                rpcid, freq, captcha_action, **kwargs
+            )
+        except TypeError:
+            result = await self.batch_rpc(
+                rpcid, freq, captcha_action, timeout=timeout
+            )
         if result.get("error"):
             raise fb.FlowBatchError(f"{rpcid}: {result['error']}")
         return fb.first_payload(result.get("data") or "", rpcid)
@@ -725,7 +744,8 @@ class FlowClient:
                                image_model: str = None,
                                count: int = 1,
                                seed: int | None = None,
-                               base_media_id: str | None = None) -> dict:
+                               base_media_id: str | None = None,
+                               cdp_endpoint: str | None = None) -> dict:
         """Generate image(s).
 
         ``character_media_ids`` are attached as reference images, which is what
@@ -752,9 +772,15 @@ class FlowClient:
                     prompt, pid, count=1, aspect=aspect_ratio, seed=request_seed,
                     model=model, ref_media_ids=refs, base_media_id=base_media_id,
                 )
-                payload = await self._batch_payload(
-                    fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE
-                )
+                try:
+                    payload = await self._batch_payload(
+                        fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE,
+                        project_id=pid, cdp_endpoint=cdp_endpoint,
+                    )
+                except TypeError:
+                    payload = await self._batch_payload(
+                        fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE
+                    )
                 generated = fb.read_images(payload)
                 if not generated:
                     raise fb.FlowBatchError("Image generation returned no media url")
@@ -1123,9 +1149,16 @@ class FlowClient:
                 media_id = None
         return media_id
 
-    async def _batch_media_urls(self, media_id: str) -> "fb.MediaUrls":
-        payload = await self._batch_payload(
-            fb.RPC_MEDIA, fb.media_request(media_id), timeout=60)
+    async def _batch_media_urls(self, media_id: str, cdp_endpoint: str | None = None) -> "fb.MediaUrls":
+        try:
+            payload = await self._batch_payload(
+                fb.RPC_MEDIA, fb.media_request(media_id), timeout=60,
+                cdp_endpoint=cdp_endpoint,
+            )
+        except TypeError:
+            payload = await self._batch_payload(
+                fb.RPC_MEDIA, fb.media_request(media_id), timeout=60
+            )
         return fb.read_media_urls(payload, media_id)
 
     async def get_credits(self, refresh: bool = False) -> dict:
@@ -1152,12 +1185,12 @@ class FlowClient:
         status = result.get("status", 500)
         return isinstance(status, int) and status == 200
 
-    async def get_media(self, media_id: str) -> dict:
+    async def get_media(self, media_id: str, cdp_endpoint: str | None = None) -> dict:
         """Fetch a media record, which is where a fresh signed url lives."""
         if not USE_BATCH_RPC:
             return await self._legacy_get_media(media_id)
         try:
-            urls = await self._batch_media_urls(media_id)
+            urls = await self._batch_media_urls(media_id, cdp_endpoint=cdp_endpoint)
         except Exception as e:
             return _batch_error(e)
         if not urls.video and not urls.image:

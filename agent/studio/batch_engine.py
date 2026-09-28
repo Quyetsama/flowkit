@@ -219,6 +219,13 @@ class BatchEngine:
         cdp_url = f"http://127.0.0.1:{profile.cdp_port}"
         client = get_flow_client()
 
+        # Auto-detect profile's active project if missing
+        if not profile.active_project_id:
+            try:
+                await profile_manager.check_profile_status(profile)
+            except Exception as exc:
+                logger.warning("Could not auto-detect project for profile %s: %s", profile.id, exc)
+
         while self.is_running and not self._cancel_requested:
             # Handle pause
             while self.is_paused and not self._cancel_requested:
@@ -237,7 +244,6 @@ class BatchEngine:
 
             try:
                 # 1. Submit Generation
-                os.environ["FLOW_CHROME_CDP"] = cdp_url
                 project_id = profile.active_project_id or ""
 
                 if task.task_type == "video":
@@ -253,6 +259,7 @@ class BatchEngine:
                         duration_s=task.duration_s,
                         resolution=task.resolution,
                         aspect_ratio=v_aspect,
+                        cdp_endpoint=cdp_url,
                     )
                 else:  # Image
                     i_aspect = task.aspect_ratio
@@ -273,11 +280,18 @@ class BatchEngine:
                         "aspect_ratio": i_aspect,
                         "image_model": task.image_model,
                         "count": 1,
+                        "cdp_endpoint": cdp_url,
                     }
                     submit_res = await client.generate_images(**img_data)
 
                 if submit_res.get("error"):
                     raise RuntimeError(submit_res["error"])
+
+                if not profile.active_project_id:
+                    res_pid = submit_res.get("data", {}).get("flowkitPolling", {}).get("project_id")
+                    if res_pid:
+                        profile.active_project_id = res_pid
+                        profile_manager.save()
 
                 # Extract media_id
                 media_list = submit_res.get("media") or submit_res.get("data", {}).get("media") or []
@@ -322,7 +336,7 @@ class BatchEngine:
                         await self.emit_event("task_updated", task.model_dump())
 
                         try:
-                            media_res = await client.get_media(task.media_id)
+                            media_res = await client.get_media(task.media_id, cdp_endpoint=cdp_url)
                             data = media_res.get("data", media_res) if isinstance(media_res, dict) else {}
                             v_url = (data.get("video", {}) or {}).get("fifeUrl")
                             i_url = (data.get("image", {}) or {}).get("fifeUrl")

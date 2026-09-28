@@ -57,3 +57,68 @@ def test_batch_task_config():
     assert len(config.prompts) == 2
     assert config.task_type == "image"
 
+
+@pytest.mark.asyncio
+async def test_batch_engine_profile_isolation(monkeypatch, tmp_path):
+    """Verify each profile worker routes generation strictly to its own CDP port & project."""
+    import agent.studio.batch_engine as engine_module
+    from agent.studio.models import BatchTask
+
+    calls = []
+
+    async def fake_video(**kwargs):
+        calls.append(("video", kwargs))
+        return {
+            "status": 200,
+            "data": {
+                "media": [{"name": "fake-media-1"}],
+                "workflows": [{"name": "fake-wf-1", "primary_media_id": "fake-media-1"}],
+            },
+        }
+
+    async def fake_images(**kwargs):
+        calls.append(("image", kwargs))
+        return {
+            "media": [{"name": "fake-img-1", "fifeUrl": "http://example.com/img.jpg"}],
+        }
+
+    monkeypatch.setattr(engine_module, "generate_omni_flash_text_video", fake_video)
+
+    engine = BatchEngine()
+    engine.is_running = True
+    config = BatchJobConfig(prompts=["test prompt"], task_type="video", output_dir=str(tmp_path))
+
+    profile_2 = ProfileConfig(
+        id="profile_2",
+        name="Profile 2",
+        cdp_port=9225,
+        user_data_dir=str(tmp_path / "p2"),
+        active_project_id="pid-profile-2-uuid",
+    )
+
+    queue = engine_module.asyncio.Queue()
+    task = BatchTask(
+        index=1,
+        prompt="test prompt",
+        task_type="video",
+        output_filename="001_test.mp4",
+        file_path=str(tmp_path / "001_test.mp4"),
+    )
+    queue.put_nowait(task)
+
+    # Monkeypatch client.get_media to return completed download url immediately
+    async def fake_get_media(mid, cdp_endpoint=None):
+        return {"status": 200, "data": {"url": "http://example.com/video.mp4"}}
+
+    fake_client = engine_module.get_flow_client()
+    monkeypatch.setattr(fake_client, "get_media", fake_get_media)
+    monkeypatch.setattr(engine, "_download_file", lambda url, path: None)
+
+    await engine._profile_worker(profile_2, queue, config)
+
+    assert len(calls) == 1
+    call_type, kwargs = calls[0]
+    assert call_type == "video"
+    assert kwargs["cdp_endpoint"] == "http://127.0.0.1:9225"
+    assert kwargs["project_id"] == "pid-profile-2-uuid"
+

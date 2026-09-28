@@ -15,6 +15,12 @@ from pathlib import Path
 import websockets
 
 CDP_BASE = os.environ.get("FLOW_CHROME_CDP", "http://127.0.0.1:9224")
+
+
+def _cdp_base(endpoint: str | None = None) -> str:
+    return endpoint or os.environ.get("FLOW_CHROME_CDP", CDP_BASE)
+
+
 FLOW_URL = "https://flow.google.com/"
 _FLOW_PREFIXES = ("https://flow.google.com/", "https://labs.google/fx/")
 CHROME_PROFILE_DIR = Path(os.environ.get("FLOW_CHROME_PROFILE_DIR", "/var/lib/flowkit/browser-profile"))
@@ -69,12 +75,13 @@ def _redundant_flow_root_ids(targets: list[dict], keep_target_id: str | None = N
     ]
 
 
-async def _prune_redundant_flow_roots(targets: list[dict], keep_target_id: str | None = None) -> int:
+async def _prune_redundant_flow_roots(targets: list[dict], keep_target_id: str | None = None, cdp_endpoint: str | None = None) -> int:
     """Close stale Flow home tabs without touching project signer tabs."""
     closed = 0
+    base = _cdp_base(cdp_endpoint)
     for target_id in _redundant_flow_root_ids(targets, keep_target_id):
         try:
-            await asyncio.to_thread(_http_text, f"{CDP_BASE}/json/close/{target_id}")
+            await asyncio.to_thread(_http_text, f"{base}/json/close/{target_id}")
             closed += 1
         except Exception:
             # Cleanup must never make a generation fail.
@@ -94,12 +101,17 @@ def _flow_page_ids(targets: list[dict]) -> list[str]:
     ]
 
 
-async def close_flow_tabs() -> int:
+async def close_flow_tabs(cdp_endpoint: str | None = None) -> int:
     """Park a dedicated browser by closing Flow pages while keeping Chrome alive."""
     closed = 0
-    for target_id in _flow_page_ids(await _targets()):
+    base = _cdp_base(cdp_endpoint)
+    try:
+        targets = await _targets(cdp_endpoint) if cdp_endpoint else await _targets()
+    except TypeError:
+        targets = await _targets()
+    for target_id in _flow_page_ids(targets):
         try:
-            await asyncio.to_thread(_http_text, f"{CDP_BASE}/json/close/{target_id}")
+            await asyncio.to_thread(_http_text, f"{base}/json/close/{target_id}")
             closed += 1
         except Exception:
             # Idle cleanup is best-effort and must never affect request success.
@@ -130,9 +142,10 @@ def _schedule_flow_tab_idle_close() -> None:
     _idle_close_task = asyncio.create_task(close_later())
 
 
-async def _targets() -> list[dict]:
+async def _targets(cdp_endpoint: str | None = None) -> list[dict]:
     try:
-        data = await asyncio.to_thread(_http_json, f"{CDP_BASE}/json")
+        base = _cdp_base(cdp_endpoint)
+        data = await asyncio.to_thread(_http_json, f"{base}/json")
     except Exception as exc:
         return [{"_error": f"CDP_UNAVAILABLE: {exc}"}]
     return data if isinstance(data, list) else []
@@ -621,6 +634,7 @@ async def _run_flow_batch_rpc_once(
     project_id: str | None = None,
     timeout: float = 120,
     max_text: int = 32_000_000,
+    cdp_endpoint: str | None = None,
 ) -> dict:
     """Run one Flow batchexecute request directly in the signed-in Chrome page.
 
@@ -629,7 +643,10 @@ async def _run_flow_batch_rpc_once(
     the same: cookies, ``at``/``f.sid``/``bl`` and reCAPTCHA never leave the
     browser page; only the Flow response body comes back through CDP.
     """
-    targets = await _targets()
+    try:
+        targets = await _targets(cdp_endpoint) if cdp_endpoint else await _targets()
+    except TypeError:
+        targets = await _targets()
     flow_targets = [
         t for t in targets
         if t.get("type") == "page"
@@ -655,13 +672,17 @@ async def _run_flow_batch_rpc_once(
     if target is not None:
         # Keep the selected signer page and remove exact-root duplicates. Project
         # pages are never considered disposable by _redundant_flow_root_ids().
-        await _prune_redundant_flow_roots(flow_targets, target.get("id"))
+        await _prune_redundant_flow_roots(flow_targets, target.get("id"), cdp_endpoint=cdp_endpoint)
 
     if target is None:
         encoded = urllib.parse.quote(FLOW_URL, safe="")
-        await asyncio.to_thread(_http_json, f"{CDP_BASE}/json/new?{encoded}", "PUT")
+        base = _cdp_base(cdp_endpoint)
+        await asyncio.to_thread(_http_json, f"{base}/json/new?{encoded}", "PUT")
         await asyncio.sleep(3)
-        targets = await _targets()
+        try:
+            targets = await _targets(cdp_endpoint) if cdp_endpoint else await _targets()
+        except TypeError:
+            targets = await _targets()
         target = next(
             (
                 t for t in targets
@@ -675,12 +696,13 @@ async def _run_flow_batch_rpc_once(
     if target is None:
         return {"error": "NO_FLOW_TAB"}
 
-    if project_id and f"/project/{project_id}" not in target.get("url", ""):
+    # Recover from 404 page if current tab is stuck
+    if "404" in str(target.get("url", "")):
         await _navigate(
             target["webSocketDebuggerUrl"],
-            f"https://flow.google.com/project/{project_id}",
+            FLOW_URL,
         )
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
 
     site_key = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
     expression = f"""(async () => {{
@@ -797,6 +819,7 @@ async def run_flow_batch_rpc(
     project_id: str | None = None,
     timeout: float = 120,
     max_text: int = 32_000_000,
+    cdp_endpoint: str | None = None,
 ) -> dict:
     """Run one batch RPC and park Flow again after a configurable idle period."""
     _cancel_flow_tab_idle_close()
@@ -810,6 +833,7 @@ async def run_flow_batch_rpc(
             project_id=project_id,
             timeout=timeout,
             max_text=max_text,
+            cdp_endpoint=cdp_endpoint,
         )
     finally:
         _schedule_flow_tab_idle_close()

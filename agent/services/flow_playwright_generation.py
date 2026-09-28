@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +44,7 @@ async def _visible_count(locator: Any) -> int:
     return visible
 
 
-async def _flow_page(browser: Any, project_id: str) -> Any:
+async def _flow_page(browser: Any, project_id: str) -> tuple[Any, str]:
     contexts = browser.contexts
     if not contexts:
         raise RuntimeError("Playwright connected to Chrome but found no browser context")
@@ -52,16 +53,67 @@ async def _flow_page(browser: Any, project_id: str) -> Any:
         if str(p.url or "").startswith("https://flow.google.com/")
     ]
     if not pages:
-        raise RuntimeError("Playwright connected to Chrome but found no Flow tab")
-    page = pages[0]
-    if f"/project/{project_id}" not in str(page.url or ""):
-        await page.goto(
-            f"https://flow.google.com/project/{project_id}",
-            wait_until="domcontentloaded",
-            timeout=30_000,
-        )
+        if contexts[0].pages:
+            page = contexts[0].pages[0]
+            await page.goto("https://flow.google.com/", wait_until="domcontentloaded", timeout=30_000)
+        else:
+            page = await contexts[0].new_page()
+            await page.goto("https://flow.google.com/", wait_until="domcontentloaded", timeout=30_000)
         await page.wait_for_timeout(1500)
-    return page
+    else:
+        page = pages[0]
+
+    # Auto-recover if tab is currently stuck at 404
+    if "404" in str(page.url or ""):
+        logger.warning("Flow page is at 404 (%s), navigating to https://flow.google.com/", page.url)
+        await page.goto("https://flow.google.com/", wait_until="domcontentloaded", timeout=30_000)
+        await page.wait_for_timeout(2000)
+
+    # If project_id provided and we are not already on it
+    if project_id and f"/project/{project_id}" not in str(page.url or ""):
+        try:
+            await page.goto(
+                f"https://flow.google.com/project/{project_id}",
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+            await page.wait_for_timeout(1500)
+            if "404" in str(page.url or ""):
+                logger.warning(
+                    "Target project %s resulted in 404 (not owned by this profile). Falling back to Flow root.",
+                    project_id,
+                )
+                await page.goto("https://flow.google.com/", wait_until="domcontentloaded", timeout=30_000)
+                await page.wait_for_timeout(2000)
+        except Exception as exc:
+            logger.warning("Failed to navigate to project %s: %s", project_id, exc)
+
+    # If currently at Flow root (or after 404 fallback), open an available project
+    if "/project/" not in str(page.url or ""):
+        project_link = page.locator('a[href*="/project/"]').first
+        if await project_link.count() > 0:
+            logger.info("Opening available project card from Flow home")
+            await project_link.click()
+            try:
+                await page.wait_for_url("**/project/**", timeout=15_000)
+                await page.wait_for_timeout(1500)
+            except Exception:
+                pass
+        else:
+            new_btn = page.locator('button:has-text("New project"), button:has-text("Dự án mới")').first
+            if await new_btn.count() > 0:
+                logger.info("Clicking New Project button")
+                await new_btn.click()
+                try:
+                    await page.wait_for_url("**/project/**", timeout=15_000)
+                    await page.wait_for_timeout(1500)
+                except Exception:
+                    pass
+
+    # Extract actual active project ID from final page URL
+    match = re.search(r"/project/([a-zA-Z0-9_-]{20,})", str(page.url or ""))
+    active_pid = match.group(1) if match else project_id
+    return page, active_pid
 
 
 async def _wait_editor(page: Any) -> None:
@@ -346,9 +398,6 @@ async def run_flow_playwright_generation(
     """Submit one generation through Flow's own browser UI using Playwright."""
     spec = parse_generation_spec(rpcid, freq)
     pid = str(project_id or spec.project_id or "")
-    if not pid:
-        return {"error": "NO_FLOW_PROJECT"}
-    spec.project_id = pid
 
     try:
         from playwright.async_api import async_playwright
@@ -359,7 +408,13 @@ async def run_flow_playwright_generation(
     try:
         endpoint = cdp_endpoint or _CDP_ENDPOINT
         browser = await playwright.chromium.connect_over_cdp(endpoint)
-        page = await _flow_page(browser, pid)
+        page, active_pid = await _flow_page(browser, pid)
+        if active_pid:
+            pid = active_pid
+            spec.project_id = active_pid
+        elif not pid:
+            return {"error": "NO_FLOW_PROJECT"}
+
         await _dismiss_overlays(page)
         # API-uploaded assets can leave the already-open project gallery stale.
         # Refresh once before composer interaction when no native-upload cache is available.
