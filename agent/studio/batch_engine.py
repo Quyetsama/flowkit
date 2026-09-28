@@ -241,18 +241,36 @@ class BatchEngine:
                 project_id = profile.active_project_id or ""
 
                 if task.task_type == "video":
+                    v_aspect = task.aspect_ratio
+                    if "PORTRAIT" in v_aspect or "9:16" in v_aspect:
+                        v_aspect = "VIDEO_ASPECT_RATIO_PORTRAIT"
+                    else:
+                        v_aspect = "VIDEO_ASPECT_RATIO_LANDSCAPE"
+
                     submit_res = await generate_omni_flash_text_video(
                         prompt=task.prompt,
                         project_id=project_id,
                         duration_s=task.duration_s,
                         resolution=task.resolution,
-                        aspect_ratio=task.aspect_ratio,
+                        aspect_ratio=v_aspect,
                     )
                 else:  # Image
+                    i_aspect = task.aspect_ratio
+                    if "PORTRAIT" in i_aspect or "9:16" in i_aspect:
+                        i_aspect = "IMAGE_ASPECT_RATIO_PORTRAIT"
+                    elif "SQUARE" in i_aspect or "1:1" in i_aspect:
+                        i_aspect = "IMAGE_ASPECT_RATIO_SQUARE"
+                    elif "FOUR_THREE" in i_aspect or "4:3" in i_aspect:
+                        i_aspect = "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE"
+                    elif "THREE_FOUR" in i_aspect or "3:4" in i_aspect:
+                        i_aspect = "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR"
+                    else:
+                        i_aspect = "IMAGE_ASPECT_RATIO_LANDSCAPE"
+
                     img_data = {
                         "prompt": task.prompt,
                         "project_id": project_id,
-                        "aspect_ratio": task.aspect_ratio,
+                        "aspect_ratio": i_aspect,
                         "image_model": task.image_model,
                         "count": 1,
                     }
@@ -278,30 +296,41 @@ class BatchEngine:
                 if not task.media_id:
                     raise RuntimeError(f"Không nhận được media_id từ phản hồi: {submit_res}")
 
-                # 2. Polling for Completion
-                task.status = "generating"
-                task.progress_percent = 30
-                await self.emit_event("task_updated", task.model_dump())
-
+                # Check if image returned immediate download url (Nano Banana)
                 download_url = None
-                poll_attempts = 0
-                max_polls = 120  # ~8 minutes max
-                while poll_attempts < max_polls and self.is_running and not self._cancel_requested:
-                    await asyncio.sleep(4)
-                    poll_attempts += 1
-                    task.progress_percent = min(75, 30 + int(poll_attempts * 0.7))
+                if task.task_type == "image" and media_list and isinstance(media_list[0], dict):
+                    first_media = media_list[0]
+                    download_url = (
+                        first_media.get("image", {}).get("generatedImage", {}).get("fifeUrl")
+                        or first_media.get("image", {}).get("fifeUrl")
+                        or first_media.get("fifeUrl")
+                        or first_media.get("url")
+                    )
+
+                # 2. Polling for Completion (if not already downloaded directly)
+                if not download_url:
+                    task.status = "generating"
+                    task.progress_percent = 30
                     await self.emit_event("task_updated", task.model_dump())
 
-                    try:
-                        media_res = await client.get_media(task.media_id)
-                        data = media_res.get("data", media_res) if isinstance(media_res, dict) else {}
-                        v_url = (data.get("video", {}) or {}).get("fifeUrl")
-                        i_url = (data.get("image", {}) or {}).get("fifeUrl")
-                        download_url = data.get("url") or v_url or i_url
-                        if download_url:
-                            break
-                    except Exception as poll_err:
-                        logger.debug("Polling %s: %s", task.media_id, poll_err)
+                    poll_attempts = 0
+                    max_polls = 120  # ~8 minutes max
+                    while poll_attempts < max_polls and self.is_running and not self._cancel_requested:
+                        await asyncio.sleep(4)
+                        poll_attempts += 1
+                        task.progress_percent = min(75, 30 + int(poll_attempts * 0.7))
+                        await self.emit_event("task_updated", task.model_dump())
+
+                        try:
+                            media_res = await client.get_media(task.media_id)
+                            data = media_res.get("data", media_res) if isinstance(media_res, dict) else {}
+                            v_url = (data.get("video", {}) or {}).get("fifeUrl")
+                            i_url = (data.get("image", {}) or {}).get("fifeUrl")
+                            download_url = data.get("url") or v_url or i_url
+                            if download_url:
+                                break
+                        except Exception as poll_err:
+                            logger.debug("Polling %s: %s", task.media_id, poll_err)
 
                 if not download_url:
                     raise TimeoutError("Quá thời gian chờ render từ Google Flow (Timeout > 8 phút)")

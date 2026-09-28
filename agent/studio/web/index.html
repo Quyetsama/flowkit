@@ -115,9 +115,9 @@
               </button>
             </div>
 
-            <!-- Video Options (Conditional) -->
-            <div id="video-options-group" class="grid grid-cols-3 gap-3">
-              <div>
+            <!-- Options Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div id="group-duration">
                 <label class="block text-xs font-medium text-slate-400 mb-1">Thời lượng</label>
                 <select id="cfg-duration" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-sm text-white focus:border-indigo-500 focus:outline-none">
                   <option value="8" selected>8 giây (Chuẩn)</option>
@@ -126,14 +126,14 @@
                   <option value="10">10 giây</option>
                 </select>
               </div>
-              <div>
+              <div id="group-resolution">
                 <label class="block text-xs font-medium text-slate-400 mb-1">Độ phân giải</label>
                 <select id="cfg-resolution" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-sm text-white focus:border-indigo-500 focus:outline-none">
                   <option value="720p" selected>720p (HD)</option>
                   <option value="360p">360p</option>
                 </select>
               </div>
-              <div>
+              <div id="group-aspect">
                 <label class="block text-xs font-medium text-slate-400 mb-1">Tỷ lệ khung hình</label>
                 <select id="cfg-aspect" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-sm text-white focus:border-indigo-500 focus:outline-none">
                   <option value="VIDEO_ASPECT_RATIO_LANDSCAPE" selected>Ngang 16:9</option>
@@ -154,8 +154,8 @@
                 </div>
               </div>
 
-              <!-- Delogo Checkbox -->
-              <label class="flex items-center gap-2 cursor-pointer p-2.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-slate-700 transition">
+              <!-- Delogo Checkbox (Video only) -->
+              <label id="group-delogo" class="flex items-center gap-2 cursor-pointer p-2.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-slate-700 transition">
                 <input type="checkbox" id="cfg-delogo" checked class="w-4 h-4 text-indigo-600 rounded bg-slate-900 border-slate-700 focus:ring-indigo-500">
                 <div class="text-xs">
                   <div class="font-medium text-white flex items-center gap-1">
@@ -278,7 +278,8 @@
         <button onclick="closeVideoModal()" class="text-slate-400 hover:text-white p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
       </div>
       <div class="aspect-video bg-black rounded-xl overflow-hidden flex items-center justify-center">
-        <video id="modal-video-player" controls class="w-full h-full object-contain"></video>
+        <video id="modal-video-player" controls class="w-full h-full object-contain hidden"></video>
+        <img id="modal-image-viewer" class="w-full h-full object-contain hidden" alt="Xem ảnh" />
       </div>
       <div class="flex justify-between items-center text-xs text-slate-400">
         <span id="modal-video-path" class="truncate font-mono"></span>
@@ -346,16 +347,36 @@
       currentType = type;
       const btnVideo = document.getElementById('btn-type-video');
       const btnImage = document.getElementById('btn-type-image');
-      const vidGroup = document.getElementById('video-options-group');
+      const grpDuration = document.getElementById('group-duration');
+      const grpResolution = document.getElementById('group-resolution');
+      const grpDelogo = document.getElementById('group-delogo');
+      const selAspect = document.getElementById('cfg-aspect');
 
       if (type === 'video') {
         btnVideo.className = 'py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white flex items-center justify-center gap-2';
         btnImage.className = 'py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-white flex items-center justify-center gap-2';
-        vidGroup.classList.remove('hidden');
+        grpDuration.classList.remove('hidden');
+        grpResolution.classList.remove('hidden');
+        grpDelogo.classList.remove('hidden');
+
+        selAspect.innerHTML = `
+          <option value="VIDEO_ASPECT_RATIO_LANDSCAPE" selected>Ngang 16:9</option>
+          <option value="VIDEO_ASPECT_RATIO_PORTRAIT">Dọc 9:16 (Shorts)</option>
+        `;
       } else {
         btnImage.className = 'py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white flex items-center justify-center gap-2';
         btnVideo.className = 'py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-white flex items-center justify-center gap-2';
-        vidGroup.classList.add('hidden');
+        grpDuration.classList.add('hidden');
+        grpResolution.classList.add('hidden');
+        grpDelogo.classList.add('hidden');
+
+        selAspect.innerHTML = `
+          <option value="IMAGE_ASPECT_RATIO_LANDSCAPE" selected>Ngang 16:9</option>
+          <option value="IMAGE_ASPECT_RATIO_PORTRAIT">Dọc 9:16</option>
+          <option value="IMAGE_ASPECT_RATIO_SQUARE">Vuông 1:1</option>
+          <option value="IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE">Ngang 4:3</option>
+          <option value="IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR">Dọc 3:4</option>
+        `;
       }
       lucide.createIcons();
     }
@@ -617,7 +638,15 @@
         } else if (t.status === 'completed') {
           statusHtml = `<span class="text-emerald-400 text-xs flex items-center gap-1"><i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i> Xong 100%</span>`;
         } else if (t.status === 'failed') {
-          statusHtml = `<span class="text-rose-400 text-xs flex items-center gap-1" title="${t.error || ''}"><i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i> Thất bại</span>`;
+          const errEscaped = (t.error || 'Lỗi không xác định').replace(/"/g, '&quot;');
+          statusHtml = `
+            <div>
+              <span class="text-rose-400 text-xs flex items-center gap-1 font-semibold">
+                <i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i> Thất bại
+              </span>
+              <div class="text-[10px] text-rose-300/80 mt-0.5 max-w-[180px] truncate" title="${errEscaped}">${t.error || ''}</div>
+            </div>
+          `;
         } else {
           statusHtml = `<span class="text-slate-500 text-xs">Đã hủy</span>`;
         }
@@ -625,9 +654,12 @@
         const viewPath = t.clean_file_path || t.file_path || '';
         let actionBtn = '';
         if (t.status === 'completed' && viewPath) {
+          const isImg = /\.(jpg|jpeg|png|webp)$/i.test(viewPath);
+          const iconName = isImg ? 'image' : 'play';
+          const btnText = isImg ? 'Xem ảnh' : 'Xem';
           actionBtn = `
-            <button onclick="previewVideo('${viewPath.replace(/\\/g, '/')}', '${t.output_filename}')" class="px-2 py-1 bg-indigo-600/20 hover:bg-indigo-600 text-indigo-300 hover:text-white rounded text-[11px] transition flex items-center gap-1 ml-auto">
-              <i data-lucide="play" class="w-3 h-3"></i> Xem
+            <button onclick="previewMedia('${viewPath.replace(/\\/g, '/')}', '${t.output_filename}')" class="px-2 py-1 bg-indigo-600/20 hover:bg-indigo-600 text-indigo-300 hover:text-white rounded text-[11px] transition flex items-center gap-1 ml-auto">
+              <i data-lucide="${iconName}" class="w-3 h-3"></i> ${btnText}
             </button>
           `;
         }
@@ -646,19 +678,40 @@
       lucide.createIcons();
     }
 
-    function previewVideo(filePath, filename) {
+    function previewMedia(filePath, filename) {
       document.getElementById('modal-video-title').innerText = filename;
       document.getElementById('modal-video-path').innerText = filePath;
+      const isImg = /\.(jpg|jpeg|png|webp)$/i.test(filePath);
       const player = document.getElementById('modal-video-player');
-      player.src = `/api/studio/video-stream?path=${encodeURIComponent(filePath)}`;
+      const imgViewer = document.getElementById('modal-image-viewer');
+      const streamUrl = `/api/studio/video-stream?path=${encodeURIComponent(filePath)}`;
+
+      if (isImg) {
+        player.classList.add('hidden');
+        player.pause();
+        player.src = '';
+        imgViewer.src = streamUrl;
+        imgViewer.classList.remove('hidden');
+      } else {
+        imgViewer.classList.add('hidden');
+        imgViewer.src = '';
+        player.src = streamUrl;
+        player.classList.remove('hidden');
+        player.play();
+      }
       document.getElementById('video-modal').classList.remove('hidden');
-      player.play();
+    }
+
+    function previewVideo(filePath, filename) {
+      previewMedia(filePath, filename);
     }
 
     function closeVideoModal() {
       const player = document.getElementById('modal-video-player');
+      const imgViewer = document.getElementById('modal-image-viewer');
       player.pause();
       player.src = '';
+      imgViewer.src = '';
       document.getElementById('video-modal').classList.add('hidden');
     }
 

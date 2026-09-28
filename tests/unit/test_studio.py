@@ -46,3 +46,14 @@ def test_batch_engine_status():
     assert status["is_running"] is False
     assert status["total"] == 0
     assert status["progress_percent"] == 0
+
+
+def test_batch_task_config():
+    config = BatchJobConfig(
+        prompts=["con mèo dễ thương", "con chó vui nhộn"],
+        task_type="image",
+        aspect_ratio="16:9",
+    )
+    assert len(config.prompts) == 2
+    assert config.task_type == "image"
+

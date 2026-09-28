@@ -179,6 +179,14 @@ async def serve_studio_ui():
 async def video_stream(path: str):
     file_path = Path(path).resolve()
     if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(404, "File video không tồn tại")
-    return FileResponse(file_path, media_type="video/mp4")
+        raise HTTPException(404, "File media không tồn tại")
+    suffix = file_path.suffix.lower()
+    media_type = "video/mp4"
+    if suffix in (".jpg", ".jpeg"):
+        media_type = "image/jpeg"
+    elif suffix == ".png":
+        media_type = "image/png"
+    elif suffix == ".webp":
+        media_type = "image/webp"
+    return FileResponse(file_path, media_type=media_type)
 
