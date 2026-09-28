@@ -341,6 +341,7 @@ async def run_flow_playwright_generation(
     *,
     project_id: str | None = None,
     timeout: float = 120,
+    cdp_endpoint: str | None = None,
 ) -> dict:
     """Submit one generation through Flow's own browser UI using Playwright."""
     spec = parse_generation_spec(rpcid, freq)
@@ -356,7 +357,8 @@ async def run_flow_playwright_generation(
 
     playwright = await async_playwright().start()
     try:
-        browser = await playwright.chromium.connect_over_cdp(_CDP_ENDPOINT)
+        endpoint = cdp_endpoint or _CDP_ENDPOINT
+        browser = await playwright.chromium.connect_over_cdp(endpoint)
         page = await _flow_page(browser, pid)
         await _dismiss_overlays(page)
         # API-uploaded assets can leave the already-open project gallery stale.

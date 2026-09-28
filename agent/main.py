@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 import websockets
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT
@@ -25,6 +26,7 @@ from agent.api.music import router as music_router
 from agent.api.models import router as models_router
 from agent.api.providers import router as providers_router
 from agent.api.active_project import router as active_project_router
+from agent.studio.routes import router as studio_router
 from agent.worker.processor import get_worker_controller
 from agent.services.flow_client import get_flow_client
 from agent.services.event_bus import event_bus
@@ -162,6 +164,7 @@ app.include_router(music_router, prefix="/api")
 app.include_router(models_router)
 app.include_router(providers_router)
 app.include_router(active_project_router)
+app.include_router(studio_router)
 
 
 import secrets as _secrets
@@ -202,6 +205,11 @@ async def health():
         "extension_connected": client.connected,
         "ws": client.ws_stats,
     }
+
+
+@app.get("/studio")
+async def studio_redirect():
+    return RedirectResponse("/api/studio/ui")
 
 
 # ─── Dashboard WebSocket ──────────────────────────────────────

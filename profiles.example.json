@@ -1,0 +1,28 @@
+{
+  "profiles": [
+    {
+      "id": "profile_1",
+      "name": "Tài khoản Chính (Port 9224)",
+      "cdp_port": 9224,
+      "user_data_dir": "",
+      "is_connected": false,
+      "is_running": false,
+      "active_project_id": null,
+      "credits_balance": null,
+      "plan": null,
+      "error_message": null
+    },
+    {
+      "id": "profile_2",
+      "name": "Tài khoản Phụ 1 (Port 9225)",
+      "cdp_port": 9225,
+      "user_data_dir": "",
+      "is_connected": false,
+      "is_running": false,
+      "active_project_id": null,
+      "credits_balance": null,
+      "plan": null,
+      "error_message": null
+    }
+  ]
+}

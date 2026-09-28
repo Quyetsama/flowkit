@@ -13,6 +13,36 @@ FlowKit hoạt động dựa trên mô hình kết hợp:
 
 ---
 
+## 🌟 CÔNG CỤ TỰ ĐỘNG HÓA 1-CLICK: FLOWKIT STUDIO (KHUYÊN DÙNG)
+
+Để không phải gõ từng lệnh mở Chrome, cURL tạo, cURL check, cURL tải và cURL xóa watermark, bạn hãy sử dụng **FlowKit Studio**:
+
+### 1. Khởi chạy 1-Click
+* **Trên Windows**: Nhấp đúp chuột vào file `run_studio.bat`.
+* **Trên macOS**: Nhấp đúp chuột vào file `run_studio.command` (hoặc chạy `./run_studio.sh` / `python flowkit_studio.py`).
+
+Trình duyệt sẽ tự động mở giao diện tại: **`http://127.0.0.1:8100/studio`**
+
+### 2. Các tính năng chính của Studio:
+* **Quản lý đa Profile (Nhiều tài khoản Google)**:
+  - Xem danh sách tài khoản, trạng thái kết nối (xanh/đỏ).
+  - Nút **"Mở Chrome"** cho từng profile (tự động phát hiện Chrome trên Windows/macOS, mở đúng profile và port CDP).
+  - Hỗ trợ thêm nhiều profile để chạy **đa luồng song song**.
+* **Tạo Hàng Loạt (Batch Studio)**:
+  - Nhập hàng loạt prompt bằng cách paste nhiều dòng hoặc upload file `.txt` / `.csv`.
+  - Chọn chế độ: **Video (Omni Flash 4s/6s/8s/10s, 720p/360p, 16:9/9:16)** hoặc **Ảnh (Nano Banana 2/Pro)**.
+  - Tích chọn **"Tự động xóa Watermark Google AI"** (Tự động chạy FFmpeg delogo sau khi tải xong).
+  - Bấm **"BẮT ĐẦU TẠO HÀNG LOẠT"**: Hệ thống sẽ tự động phân bổ prompt cho các profile rảnh, tự động tạo, tự động chờ render, tự động tải về thư mục và xóa watermark.
+  - Xem trước video/ảnh trực tiếp trong trình duyệt và bấm **"Mở Thư Mục"** để xem file.
+
+### 3. Chạy qua dòng lệnh (CLI Runner):
+Dành cho người dùng thích tự động hóa qua terminal:
+```bash
+python flowkit_batch.py --prompts prompts.txt --mode video --duration 8 --delogo --output output/my_batch
+```
+
+---
+
 ## 2. Chuẩn Bị & Cài Đặt Môi Trường
 
 ### Yêu cầu hệ thống
