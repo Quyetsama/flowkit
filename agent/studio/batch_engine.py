@@ -37,6 +37,21 @@ def slugify(text: str, max_words: int = 6) -> str:
     return slug or "item"
 
 
+ALPHA_48_PATH = Path(__file__).parent / "assets" / "alpha_48.npy"
+
+
+def load_watermark_alpha_48():
+    """Load the pre-calibrated 48x48 alpha channel map for Google watermark."""
+    try:
+        import numpy as np
+
+        if ALPHA_48_PATH.exists():
+            return np.load(str(ALPHA_48_PATH))
+    except Exception as exc:
+        logger.warning("Could not load alpha_48.npy: %s", exc)
+    return None
+
+
 class BatchEngine:
     """Coordinates batch tasks, profile workers, downloads, and post-processing."""
 
@@ -407,6 +422,75 @@ class BatchEngine:
         )
         with urllib.request.urlopen(req, timeout=60) as resp, open(target_path, "wb") as out:
             shutil.copyfileobj(resp, out)
+    def _remove_image_watermark_lossless(self, src: str, dst: str) -> bool:
+        """Mathematically reconstruct original pixels using Reverse Alpha Blending (lossless, zero blur)."""
+        try:
+            import base64
+            import cv2
+            import numpy as np
+        except ImportError:
+            return False
+
+        try:
+            img = cv2.imread(src)
+            if img is None:
+                return False
+            h, w, _ = img.shape
+
+            alpha_48 = load_watermark_alpha_48()
+            if alpha_48 is None:
+                return False
+
+            scale_factor = 2 if (h >= 1500 and w >= 1500) else 1
+            box_size = 48 * scale_factor
+            template = (
+                cv2.resize(alpha_48, (box_size, box_size), interpolation=cv2.INTER_LINEAR)
+                if scale_factor != 1
+                else alpha_48.copy()
+            )
+
+            expected_x = w - 126 * scale_factor
+            expected_y = h - 126 * scale_factor
+
+            # Broad search in bottom-right corner
+            corner_dim = 160 * scale_factor
+            roi_x1 = max(0, w - corner_dim)
+            roi_y1 = max(0, h - corner_dim)
+
+            gray_corner = cv2.cvtColor(img[roi_y1:h, roi_x1:w], cv2.COLOR_BGR2GRAY).astype(np.float32)
+            template_norm = (template / template.max() * 255.0).astype(np.float32)
+
+            res = cv2.matchTemplate(gray_corner, template_norm, cv2.TM_CCOEFF_NORMED)
+            _, max_v, _, max_l = cv2.minMaxLoc(res)
+
+            if max_v >= 0.18:
+                best_x = roi_x1 + max_l[0]
+                best_y = roi_y1 + max_l[1]
+            else:
+                best_x = expected_x
+                best_y = expected_y
+
+            best_x = max(0, min(w - box_size, best_x))
+            best_y = max(0, min(h - box_size, best_y))
+
+            patch = img[best_y : best_y + box_size, best_x : best_x + box_size].astype(np.float32)
+            a = np.clip(template * 0.64, 0.0, 0.95)[:, :, np.newaxis]
+            unblended = (patch - 255.0 * a) / (1.0 - a)
+            unblended = np.clip(unblended, 0, 255).astype(np.uint8)
+
+            img[best_y : best_y + box_size, best_x : best_x + box_size] = unblended
+
+            ext = Path(dst).suffix.lower()
+            if ext in (".jpg", ".jpeg"):
+                return cv2.imwrite(dst, img, [cv2.IMWRITE_JPEG_QUALITY, 96])
+            elif ext == ".png":
+                return cv2.imwrite(dst, img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+            elif ext == ".webp":
+                return cv2.imwrite(dst, img, [cv2.IMWRITE_WEBP_QUALITY, 96])
+            return cv2.imwrite(dst, img)
+        except Exception as exc:
+            logger.warning("Lossless watermark removal failed, falling back: %s", exc)
+            return False
 
     def _get_media_dimensions(self, file_path: str) -> tuple[int, int] | None:
         """Extract width and height using ffprobe if available."""
@@ -464,10 +548,15 @@ class BatchEngine:
         return f"delogo=x={x}:y={y}:w={w}:h={h}"
 
     def _run_delogo(self, src: str, dst: str, is_video: bool = True) -> bool:
-        """Execute FFmpeg delogo to remove bottom-right Google watermark."""
+        """Execute delogo to remove bottom-right Google watermark."""
         if not os.path.exists(src):
             logger.warning("Source file not found for delogo: %s", src)
             return False
+
+        if not is_video:
+            if self._remove_image_watermark_lossless(src, dst):
+                return True
+            logger.info("Reverse alpha blending skipped, falling back to FFmpeg delogo")
 
         dims = self._get_media_dimensions(src)
         if dims:

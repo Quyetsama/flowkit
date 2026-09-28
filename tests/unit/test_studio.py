@@ -196,3 +196,49 @@ async def test_batch_engine_image_delogo(monkeypatch, tmp_path):
     assert task.status == "completed"
 
 
+def test_remove_image_watermark_lossless(tmp_path):
+    """Test mathematical reverse alpha blending on synthetic watermarked image."""
+    import cv2
+    import numpy as np
+    from agent.studio.batch_engine import BatchEngine, load_watermark_alpha_48
+
+    engine = BatchEngine()
+
+    # Create synthetic 1024x1024 image with green background and sharp black line
+    img = np.full((1024, 1024, 3), (120, 170, 140), dtype=np.uint8)
+    cv2.line(img, (890, 890), (940, 940), (0, 0, 0), 3)
+
+    alpha = load_watermark_alpha_48()
+    assert alpha is not None
+    assert alpha.shape == (48, 48)
+
+    # Blend watermark at (898, 898)
+    patch = img[898:898+48, 898:898+48].astype(np.float32)
+    a = (alpha * 0.64)[:, :, np.newaxis]
+    watermarked_patch = patch * (1.0 - a) + 255.0 * a
+    img[898:898+48, 898:898+48] = np.clip(watermarked_patch, 0, 255).astype(np.uint8)
+
+    src = str(tmp_path / "synthetic.jpg")
+    dst = str(tmp_path / "synthetic_clean.jpg")
+    cv2.imwrite(src, img)
+
+    success = engine._remove_image_watermark_lossless(src, dst)
+    assert success is True
+    assert Path(dst).exists()
+
+    clean_img = cv2.imread(dst)
+    # Verify watermark is removed:
+    # 1. Line pixel is preserved as sharp black (not blurred into green)
+    line_val = clean_img[898 + 24, 898 + 24]
+    assert int(line_val[0]) < 15
+    assert int(line_val[1]) < 15
+    assert int(line_val[2]) < 15
+
+    # 2. Background pixel is restored to green background (120, 170, 140)
+    bg_val = clean_img[898 + 20, 898 + 28]
+    assert abs(int(bg_val[0]) - 120) < 15
+    assert abs(int(bg_val[1]) - 170) < 15
+    assert abs(int(bg_val[2]) - 140) < 15
+
+
+

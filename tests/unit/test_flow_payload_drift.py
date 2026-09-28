@@ -58,6 +58,7 @@ def test_image_volatile_values_and_multi_submit_do_not_report_drift():
         aspect="IMAGE_ASPECT_RATIO_LANDSCAPE",
         model="NARWHAL",
         ref_media_ids=[MEDIA],
+        seed=123456789,
     )
     actual_inner = _replace_volatile(_inner(expected))
     # UI launches x2 as separate ogiZ0b requests and chooses its own seed.
