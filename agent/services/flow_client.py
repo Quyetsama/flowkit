@@ -604,6 +604,9 @@ class FlowClient:
             if ep == default_ep:
                 state.slots = self._generation_slots
                 state.rate_gate = self._generation_rate_gate
+                state.unusual_until = self._generation_unusual_until
+                state.last_unusual_at = self._generation_last_unusual_at
+                state.last_unusual_rpc = self._generation_last_unusual_rpc
             self._endpoint_states[ep] = state
         return self._endpoint_states[ep]
 
