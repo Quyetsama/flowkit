@@ -76,6 +76,8 @@ class FakeFlowClientForPipeline:
 
 @pytest.mark.asyncio
 async def test_generate_image_endpoint_auto_delogo(monkeypatch, tmp_path):
+    if not Path("frame_stickman.png").exists():
+        pytest.skip("frame_stickman.png not found")
     client = FakeFlowClientForPipeline()
     monkeypatch.setattr(flow_api, "get_flow_client", lambda: client)
     monkeypatch.setattr(flow_api, "FLOW_IMAGES_DIR", tmp_path)

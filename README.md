@@ -46,6 +46,16 @@ The goal is simple: **when Flow changes, fix the integration quickly and upstrea
 
 ## AI Agent Support
 
+<p align="center">
+  <img src="docs/agents/v2/muse.svg" height="56" alt="Muse" title="Muse" />
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/agents/v2/claude.svg" height="56" alt="Claude Code" title="Claude Code" />
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/agents/v2/codex.svg" height="56" alt="Codex" title="Codex" />
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/agents/v2/agy.svg" height="56" alt="agy" title="agy (Google Antigravity)" />
+</p>
+
 | Agent | Skills | Video review provider |
 |-------|--------|----------------------|
 | **Muse** | Native — reads `skills/fk-*.md` directly, vision on files and contact sheets (`muse.read`) | `muse` (= the agent itself) — official opt-in self-review: no CLI, no model, no API key; score sheets by hand via `review-sheets` → `review-submit` |
@@ -605,6 +615,41 @@ FlowKit is more than the low-level API. The repository also contains the origina
 </p>
 
 The low-level REST API can be used independently by your own application, while the higher-level pipeline remains available for larger video workflows.
+
+## Showcase
+
+All outputs below were generated end-to-end by this system — from story concept to final YouTube-ready video with thumbnails, narration, and branding.
+
+### Full Video Demos
+
+<p align="center">
+  <a href="https://youtu.be/DNroTtRKyUM">
+    <img src="docs/images/thumbnail_f15e_rescue_play.jpg" width="400" alt="F-15E Pilot Rescue — 36 Hours Evading Behind Enemy Lines" />
+  </a>
+  <a href="https://youtu.be/KhCj_zjbSps">
+    <img src="docs/images/thumbnail_hormuz_play.jpg" width="400" alt="Hormuz Strait — US Navy vs 6 Iranian Attack Boats" />
+  </a>
+</p>
+<p align="center">
+  <a href="https://youtu.be/DNroTtRKyUM">▶️ <b>Watch: F-15E Pilot Rescue (36 Hours Evading)</b></a>
+  &nbsp;&nbsp;•&nbsp;&nbsp;
+  <a href="https://youtu.be/KhCj_zjbSps">▶️ <b>Watch: Hormuz Strait (US Navy vs 6 Attack Boats)</b></a>
+</p>
+
+### Generated YouTube Thumbnails
+
+<p align="center">
+  <a href="https://youtu.be/KhCj_zjbSps"><img src="docs/images/thumbnail_hormuz.jpg" width="400" alt="Hormuz Strait naval blockade thumbnail" /></a>
+  <a href="https://youtu.be/DNroTtRKyUM"><img src="docs/images/thumbnail_f15e_rescue.jpg" width="400" alt="F-15E pilot rescue thumbnail" /></a>
+</p>
+<p align="center">
+  <img src="docs/images/thumbnail_operation_resolve.jpg" width="400" alt="Operation Absolute Resolve thumbnail" />
+  <img src="docs/images/thumbnail_tapalpa.jpg" width="400" alt="Tapalpa cartel operation thumbnail" />
+</p>
+<p align="center">
+  <img src="docs/images/thumbnail_north_korea.jpg" width="400" alt="North Korea defection thumbnail" />
+  <img src="docs/images/thumbnail_iran_israel.jpg" width="400" alt="Iran vs Israel conflict thumbnail" />
+</p>
 
 ## Maintained fork vs upstream
 
