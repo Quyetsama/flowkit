@@ -48,6 +48,8 @@ from agent.services.watermark_remover import (
     get_media_dimensions,
 )
 
+from agent.studio.profile_manager import profile_manager
+
 logger = logging.getLogger(__name__)
 
 TAG_IMAGE = "🎨 Tạo & Xử Lý Ảnh (Image Generation)"
@@ -61,6 +63,52 @@ FLOW_VIDEOS_DIR = FLOW_OUTPUT_DIR / "videos"
 FLOW_UPLOADS_DIR = FLOW_OUTPUT_DIR / "uploads"
 
 router = APIRouter(prefix="/flow")
+
+_flow_round_robin_counter = 0
+
+
+def resolve_profile_target(
+    profile_id: Optional[str] = None,
+    cdp_endpoint: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Resolves (cdp_endpoint, active_project_id, profile_id).
+
+    If explicit cdp_endpoint or profile_id is provided, routes to that Chrome profile.
+    If omitted, automatically round-robins across all connected Chrome profiles.
+    """
+    global _flow_round_robin_counter
+
+    # 1. Explicit CDP endpoint
+    if cdp_endpoint and cdp_endpoint.strip():
+        ep = cdp_endpoint.strip().rstrip("/")
+        for p in profile_manager.list_profiles():
+            if f":{p.cdp_port}" in ep:
+                return ep, p.active_project_id, p.id
+        return ep, None, None
+
+    # 2. Explicit profile_id
+    if profile_id and profile_id.strip():
+        p = profile_manager.get_profile(profile_id.strip())
+        if p:
+            ep = f"http://127.0.0.1:{p.cdp_port}"
+            return ep, p.active_project_id, p.id
+
+    # 3. Auto Load-Balancing: Round-robin across connected profiles
+    all_profiles = profile_manager.list_profiles()
+    connected = [p for p in all_profiles if p.is_connected]
+    if connected:
+        selected = connected[_flow_round_robin_counter % len(connected)]
+        _flow_round_robin_counter += 1
+        ep = f"http://127.0.0.1:{selected.cdp_port}"
+        logger.info(
+            "[FlowKit MultiProfile] Auto-routing request to profile %s (%s) on %s",
+            selected.id,
+            selected.name,
+            ep,
+        )
+        return ep, selected.active_project_id, selected.id
+
+    return None, None, None
 
 
 class GenerateImageRequest(BaseModel):
@@ -112,6 +160,14 @@ class GenerateImageRequest(BaseModel):
         default=True,
         description="Tự động tải ảnh về và xóa watermark Google bằng thuật toán Lossless Reverse Alpha Blending.",
         examples=[True],
+    )
+    profile_id: Optional[str] = Field(
+        default=None,
+        description="ID profile Google Flow cụ thể (vd: 'profile_1', 'profile_2'). Nếu để trống, server sẽ tự động xoay vòng qua các profile đang kết nối.",
+    )
+    cdp_endpoint: Optional[str] = Field(
+        default=None,
+        description="CDP endpoint URL cụ thể (vd: 'http://127.0.0.1:9224').",
     )
 
 
@@ -421,6 +477,14 @@ class GenerateVideoFullRequest(BaseModel):
         description="Thời gian tối đa chờ render hoàn tất (giây).",
         examples=[480],
     )
+    profile_id: Optional[str] = Field(
+        default=None,
+        description="ID profile Google Flow cụ thể (vd: 'profile_1', 'profile_2').",
+    )
+    cdp_endpoint: Optional[str] = Field(
+        default=None,
+        description="CDP endpoint URL cụ thể (vd: 'http://127.0.0.1:9224').",
+    )
 
 
 class GenerateVideoFullResponse(BaseModel):
@@ -548,6 +612,14 @@ class UploadImageRequest(BaseModel):
         description="Existing Flow project id, or empty to use/create the session project.",
     )
     file_name: str = Field(default="image.png", description="Filename sent to Google Flow.")
+    profile_id: Optional[str] = Field(
+        default=None,
+        description="ID profile Google Flow cụ thể (vd: 'profile_1', 'profile_2').",
+    )
+    cdp_endpoint: Optional[str] = Field(
+        default=None,
+        description="CDP endpoint URL cụ thể (vd: 'http://127.0.0.1:9224').",
+    )
 
 
 class CheckStatusRequest(BaseModel):
@@ -716,9 +788,12 @@ async def generate_image(body: GenerateImageRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    project_id = await _resolve_direct_project(client, body.project_id)
-    data = body.model_dump(exclude={"reference_media_ids", "auto_delogo"})
+    target_cdp, target_pid, _ = resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
+    data = body.model_dump(exclude={"reference_media_ids", "auto_delogo", "profile_id", "cdp_endpoint"})
     data["project_id"] = project_id
+    if target_cdp:
+        data["cdp_endpoint"] = target_cdp
     refs = list(dict.fromkeys((body.reference_media_ids or []) + (body.character_media_ids or [])))
     data["character_media_ids"] = refs or None
     result = await client.generate_images(**data)
@@ -1129,6 +1204,7 @@ async def _upload_image_bytes(
     project_id: str,
     mime_type: str,
     file_name: str,
+    cdp_endpoint: Optional[str] = None,
 ) -> dict:
     """Upload bytes through the shared Flow path and return the public response."""
     if not image_bytes:
@@ -1140,6 +1216,7 @@ async def _upload_image_bytes(
         mime_type=mime_type,
         project_id=resolved_project_id,
         file_name=file_name,
+        cdp_endpoint=cdp_endpoint,
     )
     if result.get("error") or (
         isinstance(result.get("status"), int) and result["status"] >= 400
@@ -1213,6 +1290,8 @@ async def upload_image(body: UploadImageRequest):
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
 
+    target_cdp, target_pid, _ = resolve_profile_target(body.profile_id, body.cdp_endpoint)
+
     if body.image_base64:
         try:
             image_bytes = base64.b64decode(body.image_base64, validate=True)
@@ -1235,9 +1314,10 @@ async def upload_image(body: UploadImageRequest):
     return await _upload_image_bytes(
         client,
         image_bytes,
-        project_id=body.project_id,
+        project_id=body.project_id or target_pid or "",
         mime_type=mime,
         file_name=body.file_name,
+        cdp_endpoint=target_cdp,
     )
 
 
@@ -1311,7 +1391,8 @@ async def generate_video_full(body: GenerateVideoFullRequest):
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
 
-    project_id = await _resolve_direct_project(client, body.project_id)
+    target_cdp, target_pid, _ = resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     start_time = time.time()
 
     # 1. Submit request based on input parameters
@@ -1329,6 +1410,7 @@ async def generate_video_full(body: GenerateVideoFullRequest):
                     resolution=body.resolution,
                     aspect_ratio=body.aspect_ratio,
                     user_paygate_tier=body.user_paygate_tier,
+                    cdp_endpoint=target_cdp,
                 )
             else:
                 submit_res = await generate_omni_flash_first_frame_video(
@@ -1340,6 +1422,7 @@ async def generate_video_full(body: GenerateVideoFullRequest):
                     resolution=body.resolution,
                     aspect_ratio=body.aspect_ratio,
                     user_paygate_tier=body.user_paygate_tier,
+                    cdp_endpoint=target_cdp,
                 )
         else:
             payload = {
@@ -1350,6 +1433,7 @@ async def generate_video_full(body: GenerateVideoFullRequest):
                 "scene_id": body.scene_id,
                 "aspect_ratio": body.aspect_ratio,
                 "user_paygate_tier": body.user_paygate_tier,
+                "cdp_endpoint": target_cdp,
             }
             submit_res = await client.generate_video(**{k: v for k, v in payload.items() if v is not None})
     elif body.reference_media_ids:
@@ -1363,6 +1447,7 @@ async def generate_video_full(body: GenerateVideoFullRequest):
                 resolution=body.resolution,
                 aspect_ratio=body.aspect_ratio,
                 user_paygate_tier=body.user_paygate_tier,
+                cdp_endpoint=target_cdp,
             )
         else:
             submit_res = await client.generate_video_from_references(
@@ -1383,6 +1468,7 @@ async def generate_video_full(body: GenerateVideoFullRequest):
             resolution=body.resolution,
             aspect_ratio=body.aspect_ratio,
             user_paygate_tier=body.user_paygate_tier,
+            cdp_endpoint=target_cdp,
         )
 
     if not submit_res or submit_res.get("error") or (isinstance(submit_res.get("status"), int) and submit_res["status"] >= 400):

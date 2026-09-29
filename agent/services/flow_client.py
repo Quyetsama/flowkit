@@ -1311,16 +1311,19 @@ class FlowClient:
         return {"status": 200, "data": data}
 
     async def upload_image(self, image_base64: str, mime_type: str = "image/jpeg",
-                            project_id: str = "", file_name: str = "image.jpg") -> dict:
+                            project_id: str = "", file_name: str = "image.jpg",
+                            cdp_endpoint: str | None = None) -> dict:
         """Upload an image into the project so it can be used as a reference."""
         if not USE_BATCH_RPC:
             return await self._legacy_upload_image(image_base64, mime_type, project_id, file_name)
         try:
-            pid = self._batch_project_id(project_id)
+            pid = self._batch_project_id(project_id, cdp_endpoint=cdp_endpoint)
             payload = await self._batch_payload(
                 fb.RPC_UPLOAD_IMAGE,
                 fb.upload_request(image_base64, pid, mime_type, file_name),
                 fb.CAPTCHA_IMAGE, timeout=120,
+                project_id=pid,
+                cdp_endpoint=cdp_endpoint,
             )
             media_id = fb.read_uploaded_media_id(payload)
         except Exception as e:
