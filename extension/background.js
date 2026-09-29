@@ -8,8 +8,10 @@
  * `Bearer ya29.…` the old REST host needed. The current path is `batch_rpc`:
  * the agent builds an `f.req` envelope, this worker mints a captcha for it and
  * runs the POST in the page's MAIN world, where the `at` CSRF token lives.
- * The bearer capture and `api_request` proxy below are the legacy path, kept
- * for USE_BATCH_RPC=0 and for an old pinned labs.google tab.
+ * The bearer capture and the `api_request` / `trpc_request` proxies below are
+ * the pre-migration path. The agent no longer sends either — it speaks only
+ * `batch_rpc`. They stay so an extension updated ahead of its agent keeps
+ * serving an older one; remove them once no agent in the wild sends them.
  */
 
 const AGENT_WS_URL = 'ws://127.0.0.1:9222';
@@ -501,8 +503,8 @@ async function runBatchRpc(cmd) {
       const bl = wiz.cfb2h;
       if (!at) return { error: 'NO_AT_TOKEN' };
       const reqid = Math.floor(Math.random() * 900000) + 100000;
-      // Match the request metadata emitted by Flow's own WIZ client. In
-      // particular GEM_PIX_2 rejects image generation without source-path.
+      // Match Flow's own WIZ metadata. GEM_PIX_2 (Nano Banana Pro) rejects
+      // image generation when source-path is missing even though Lite may not.
       const sourcePath = location.pathname || '/';
       const hl = (document.documentElement.lang || navigator.language || 'en').split('-')[0];
       const url =
@@ -552,9 +554,17 @@ async function handleBatchRpc(msg) {
   // Polls and listing lookups run constantly; only the generates are worth
   // a row in the log the popup shows.
   const visible = hasCaptcha;
+  const _RPC_LABELS = {
+    ogiZ0b: 'Gen Image', eb1hJf: 'Gen Video', YhhmEf: 'Gen Video (text)',
+    nprQif: 'Gen Video (chain)', MZZa6b: 'Gen Video (refs)',
+    maseQ: 'Upload Image', SPrCad: 'Upscale Image',
+    jHPbke: 'Create Project', jwpduf: 'Poll Operation',
+    Zzl0ze: 'Project Media', as29s: 'Get Media',
+  };
+  const logType = _RPC_LABELS[rpcid] || `RPC:${rpcid}`;
   if (visible) {
     addRequestLog({
-      id, type: `RPC:${rpcid}`, time: new Date().toISOString(),
+      id, type: logType, time: new Date().toISOString(),
       status: 'processing', error: null, outputUrl: null, url: rpcid,
       payloadSummary: freq.slice(0, 200),
     });
@@ -643,8 +653,12 @@ async function handleTrpcRequest(msg) {
   }
 }
 
-// Legacy REST proxy against aisandbox-pa. Reachable only with USE_BATCH_RPC=0
-// on a profile that still holds a `Bearer ya29.…`; Flow stopped minting those.
+// Legacy REST proxy against aisandbox-pa. No current agent sends `api_request`;
+// kept only so an extension updated ahead of its agent still serves an older
+// one. It needs a `Bearer ya29.…` that Flow stopped minting, so it 401s on any
+// post-migration profile — as does sendTelemetry below, which early-returns
+// without a flowKey. Nothing here reaches aisandbox-pa any more; when the
+// oldest agent in the wild speaks batch_rpc, this and the host permission go.
 async function handleApiRequest(msg) {
   const { id, params } = msg;
   const { url, method, headers, body, captchaAction } = params;
