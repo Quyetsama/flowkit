@@ -220,6 +220,24 @@ async def extension_status():
     }
 
 
+@router.post("/clear-hijack")
+async def clear_hijack_cooldown():
+    """Reset the generation cooldown triggered by extension_hijack_detected.
+
+    Call this after deploying the bypass fix to immediately resume generation
+    without waiting for the cooldown to expire.
+    """
+    import time as _time
+    client = get_flow_client()
+    old_until = client._generation_unusual_until
+    client._generation_unusual_until = 0.0
+    was_active = old_until > 0.0 and old_until > _time.monotonic()
+    return {
+        "cleared": True,
+        "was_active": was_active,
+    }
+
+
 @router.post("/ensure-session")
 async def ensure_session():
     """Reopen/reload Flow in the persistent Google profile and re-check login."""
