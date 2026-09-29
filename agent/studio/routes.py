@@ -52,11 +52,11 @@ async def create_profile(body: CreateProfileRequest):
 
 
 @router.delete("/profiles/{profile_id}")
-async def delete_profile(profile_id: str):
-    success = profile_manager.delete_profile(profile_id)
+async def delete_profile(profile_id: str, delete_data: bool = True):
+    success = profile_manager.delete_profile(profile_id, delete_data=delete_data)
     if not success:
         raise HTTPException(404, f"Không tìm thấy profile '{profile_id}'")
-    return {"success": True}
+    return {"success": True, "data_deleted": delete_data}
 
 
 @router.post("/profiles/{profile_id}/launch")

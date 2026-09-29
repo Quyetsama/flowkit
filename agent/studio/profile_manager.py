@@ -147,12 +147,81 @@ class ProfileManager:
         self.save()
         return p
 
-    def delete_profile(self, profile_id: str) -> bool:
-        if profile_id in self._profiles:
-            del self._profiles[profile_id]
-            self.save()
-            return True
-        return False
+    def _close_chrome_instance(self, profile: ProfileConfig) -> None:
+        """Attempt to gracefully close Chrome on this profile's CDP port before deleting data."""
+        if not profile.cdp_port:
+            return
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{profile.cdp_port}/json/version", method="GET")
+            with urllib.request.urlopen(req, timeout=0.8) as resp:
+                vdata = json.loads(resp.read().decode("utf-8"))
+            ws_url = vdata.get("webSocketDebuggerUrl")
+            if ws_url:
+                import websockets.sync.client
+                with websockets.sync.client.connect(ws_url, close_timeout=1) as ws:
+                    ws.send(json.dumps({"id": 1, "method": "Browser.close"}))
+                import time
+                time.sleep(0.5)
+        except Exception as exc:
+            logger.debug("Could not close Chrome on port %s via CDP: %s", profile.cdp_port, exc)
+
+    def _delete_profile_data_dir(self, user_data_dir: str | None) -> None:
+        """Safely delete user data directory containing all cookies, cache, and session tokens."""
+        if not user_data_dir:
+            return
+
+        try:
+            target_path = Path(user_data_dir).expanduser().resolve()
+            home = Path.home().resolve()
+            root = Path("/").resolve()
+
+            if target_path == home or target_path == root:
+                logger.warning("Refusing to delete unsafe root or home path: %s", target_path)
+                return
+
+            if not target_path.exists() or not target_path.is_dir():
+                return
+
+            path_str = str(target_path)
+            is_recognized_profile_dir = (
+                "FlowkitProfiles" in path_str
+                or "flowkit_profiles" in path_str
+                or "profile_" in target_path.name.lower()
+            )
+            if not is_recognized_profile_dir:
+                try:
+                    target_path.relative_to(home)
+                    if len(target_path.parts) <= len(home.parts) + 1:
+                        logger.warning("Refusing to delete shallow directory directly under home: %s", target_path)
+                        return
+                except ValueError:
+                    import tempfile
+                    temp_dir = Path(tempfile.gettempdir()).resolve()
+                    try:
+                        target_path.relative_to(temp_dir)
+                    except ValueError:
+                        logger.warning("Refusing to delete path outside home and temp: %s", target_path)
+                        return
+
+            logger.info("Purging profile user data directory (cookies & sessions): %s", target_path)
+            shutil.rmtree(target_path, ignore_errors=True)
+        except Exception as exc:
+            logger.error("Failed to delete profile data directory %s: %s", user_data_dir, exc)
+
+    def delete_profile(self, profile_id: str, delete_data: bool = True) -> bool:
+        """Delete profile configuration and optionally purge all cookies and data on disk."""
+        if profile_id not in self._profiles:
+            return False
+
+        profile = self._profiles[profile_id]
+
+        if delete_data:
+            self._close_chrome_instance(profile)
+            self._delete_profile_data_dir(profile.user_data_dir)
+
+        del self._profiles[profile_id]
+        self.save()
+        return True
 
     async def check_profile_status(self, profile: ProfileConfig) -> ProfileConfig:
         """Query Chrome loopback CDP to see if this profile is active and has Flow open."""

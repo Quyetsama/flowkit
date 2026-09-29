@@ -33,6 +33,38 @@ def test_profile_manager_lifecycle(tmp_path):
     assert len(mgr.list_profiles()) == 1
 
 
+def test_profile_manager_delete_profile_data(tmp_path):
+    pfile = tmp_path / "profiles_test.json"
+    mgr = ProfileManager(file_path=pfile)
+
+    # 1. Profile with data directory containing simulated cookies & session files
+    data_dir = tmp_path / "FlowkitProfiles" / "profile_test_purge"
+    data_dir.mkdir(parents=True)
+    cookies_file = data_dir / "Cookies"
+    cookies_file.write_text("dummy-cookie-data")
+    assert cookies_file.exists()
+
+    p = mgr.add_profile("Purge Test", port=9299, user_data_dir=str(data_dir))
+    assert mgr.get_profile(p.id) is not None
+
+    # Delete with delete_data=True
+    deleted = mgr.delete_profile(p.id, delete_data=True)
+    assert deleted is True
+    assert mgr.get_profile(p.id) is None
+    assert not data_dir.exists()
+
+    # 2. Test delete_data=False preserves directory
+    data_dir_keep = tmp_path / "FlowkitProfiles" / "profile_test_keep"
+    data_dir_keep.mkdir(parents=True)
+    (data_dir_keep / "Cookies").write_text("keep-cookie-data")
+
+    p_keep = mgr.add_profile("Keep Test", port=9298, user_data_dir=str(data_dir_keep))
+    deleted_keep = mgr.delete_profile(p_keep.id, delete_data=False)
+    assert deleted_keep is True
+    assert mgr.get_profile(p_keep.id) is None
+    assert data_dir_keep.exists()
+
+
 def test_find_chrome_executable():
     chrome = find_chrome_executable()
     # On macOS developer machine, Chrome should be found

@@ -473,8 +473,8 @@
     }
 
     async function deleteProfile(profileId) {
-      if (!confirm('Bạn có chắc muốn xóa profile này?')) return;
-      await fetch(`/api/studio/profiles/${profileId}`, { method: 'DELETE' });
+      if (!confirm('Bạn có chắc muốn xóa profile này? Toàn bộ cookie, phiên đăng nhập và dữ liệu của profile sẽ bị xóa hoàn toàn.')) return;
+      await fetch(`/api/studio/profiles/${profileId}?delete_data=true`, { method: 'DELETE' });
       await loadProfiles(true);
     }
 
