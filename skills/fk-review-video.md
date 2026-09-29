@@ -1,27 +1,37 @@
-Review AI-generated scene videos for quality using Claude Vision.
+Review AI-generated scene videos for quality.
 
-Usage: `/fk-review-video <video_id> [--mode light|deep]`
+Usage: `/fk-review-video <video_id> [--mode light|deep] [--by cli|muse]`
 
-Default mode: `light`. Orientation auto-detected from project `meta.json`.
+Default mode: `light`. Default reviewer: `cli` (whatever the `video_review`
+role points at in `agent/providers.json`).
+
+## Reviewer backends
+
+- **`cli`** (default): `POST /api/videos/<VID>/review` shells out to the
+  configured `video_review` role provider. Needs the CLI binary on PATH.
+- **`muse`** (official provider): the server builds contact sheets
+  (`POST /api/videos/<VID>/review-sheets`), Muse reads them with vision and
+  scores each scene, then submits (`POST /api/videos/<VID>/review-submit`).
+  Works everywhere — no CLI, no API key. Select it with
+  `/fk-change-provider set muse`.
 
 ## Prerequisites
 
-- `ANTHROPIC_API_KEY` env var set
 - `ffmpeg` + `ffprobe` installed
 - Scenes must have completed videos (`${ori}_video_status = COMPLETED`)
+- (`cli` only) the review CLI installed; (`muse`) nothing extra
 
 ## Step 1: Pre-check
 
 ```bash
-# Verify server + extension connected
+# Verify server is up (extension NOT required for review)
 curl -s http://127.0.0.1:8100/health
-# Must return: {"extension_connected": true}
 
 # Verify video exists
 curl -s http://127.0.0.1:8100/api/videos/<VID>
 ```
 
-**ABORT** if extension not connected or video not found.
+**ABORT** if the server is down or the video is not found.
 
 ## Step 2: Check scenes have completed videos
 
@@ -33,7 +43,48 @@ For each scene, verify `${ori}_video_status = COMPLETED` (orientation auto-detec
 
 **ABORT** if any scene is missing a completed video — tell user to run `/fk-gen-videos` first.
 
-## Step 3: Run review via API
+## Step 3a: Muse review (`--by muse`)
+
+Build the contact sheets — no AI CLI involved:
+
+```bash
+curl -s -X POST "http://127.0.0.1:8100/api/videos/<VID>/review-sheets" \
+  -H "Content-Type: application/json" \
+  -d '{"project_id": "<PID>", "mode": "light"}' | python3 -m json.tool
+# → {sheets: [{scene_id, sheets: ["/abs/path/sheet_1.jpg", ...],
+#               n_frames, fps, prompt (rubric), scene_prompt, ...}]}
+```
+
+Sheets persist under `<output>/<slug>/review/sheets/<scene_id>/`. **Read each
+sheet image with vision** and score the scene against the rubric in `prompt`:
+6 dimensions (0.0–10.0), errors with severity (CRITICAL/HIGH/MINOR) +
+time_range + description, usable_segments. Be strict on CRITICAL errors
+(character morph, breed swap, role reversal, brand logo, wrong count) —
+any CRITICAL caps character_consistency at 3.0 and the verdict below
+acceptable.
+
+Submit the scores — the server applies the same validation, severity rules,
+and caps as the CLI backend:
+
+```bash
+curl -s -X POST "http://127.0.0.1:8100/api/videos/<VID>/review-submit" \
+  -H "Content-Type: application/json" \
+  -d '{"project_id": "<PID>", "mode": "light", "scores": [
+    {"scene_id": "<SID>", "n_frames": 32, "fps": 4.0,
+     "dimensions": {"character_consistency": 8.0, "prompt_adherence": 7.5,
+                    "motion_quality": 7.0, "visual_fidelity": 8.0,
+                    "temporal_coherence": 7.5, "composition": 8.0},
+     "errors": [{"severity": "MINOR", "time_range": "5s-6s",
+                 "description": "background signage garbles"}],
+     "usable_segments": [{"time_range": "0s-8s", "score": 8.0}]}
+  ]}' | python3 -m json.tool
+```
+
+To auto-regenerate bad scenes from Muse scores (bounded by
+`max_regenerations` per scene), pass the same `scores` array to
+`POST /api/videos/<VID>/review-regenerate`.
+
+## Step 3b: CLI review (default, `--by cli`)
 
 ```bash
 curl -X POST "http://127.0.0.1:8100/api/videos/<VID>/review?project_id=<PID>&mode=light&orientation=${ORI}"
@@ -43,13 +94,8 @@ curl -X POST "http://127.0.0.1:8100/api/videos/<VID>/review?project_id=<PID>&mod
 - `mode`: `light` (default) or `deep`
 - `orientation`: auto-detected from meta.json (`${ORI}`)
 
-The API will extract frames from each scene video, send them to Claude Vision, and return per-scene quality scores.
-
-**Poll until complete:**
-```bash
-curl -s http://127.0.0.1:8100/api/requests/<RID>
-# Wait for status: "COMPLETED"
-```
+The API extracts frames from each scene video, sends them to the configured
+review CLI, and returns per-scene quality scores.
 
 ## Step 4: Interpret results
 

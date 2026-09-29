@@ -5,6 +5,7 @@ Diagnose any FlowKit error and prescribe a fix. Knows the full error taxonomy ac
 **TRIGGER (auto-invoke) when:**
 - Any `/api/requests/*` response has `status=FAILED` or `error_message` is set
 - A request has been `PROCESSING` for > 10 minutes with no progress
+- A provider job is stuck `QUEUED` (no worker), `CLAIMED` past its lease, or `FAILED` — or any `/api/provider-jobs/*` call returns 409
 - `GET /health` returns `extension_connected: false`
 - User reports any error string containing: `UNSAFE_GENERATION`, `QUOTA`, `not found`, `CAPTCHA`, `UNUSUAL_ACTIVITY`, `NO_AT_TOKEN`, `NO_FLOW_PROJECT`, `UNSUPPORTED_ON_BATCH_API`, `NO_FLOW_KEY`, `NO_FLOW_TAB`, `FLOW_TAB_DISCARDED`, `extension_switched`, `Failed to fetch`, `MODEL_ACCESS_DENIED`, `PAYGATE_TIER_TWO`, `invalidTags`, `quotaExceeded`, `invalid_grant`
 - User asks "why did X fail", "what's wrong with the pipeline", "why is this stuck", "tại sao X lỗi", "lỗi gì vậy"
@@ -45,9 +46,16 @@ curl -s "http://127.0.0.1:8100/api/requests?status=FAILED&limit=20"
 
 # Stuck in PROCESSING > 10 min
 curl -s "http://127.0.0.1:8100/api/requests?status=PROCESSING"
+
+# Provider jobs (assistant / external workers)
+curl -s "http://127.0.0.1:8100/api/provider-jobs?limit=20"
 ```
 
 Bucket the failures by `error_message` prefix, print a table, and for each bucket give the fix from the taxonomy.
+For requests with a `provider` other than `flow`, also read the linked
+provider job (`provider_job_id` on the request row): a `QUEUED` job with no
+worker means `assistant_worker.py` isn't running; a `FAILED` job carries the
+worker's `error_message`.
 
 ## Mode 2: Single request (`/fk-doctor <RID>`)
 
@@ -61,6 +69,8 @@ Read:
 - `retry_count` — will it retry? (MAX_RETRIES=5)
 - `type` — GENERATE_IMAGE / GENERATE_VIDEO / UPSCALE_VIDEO / GENERATE_CHARACTER_IMAGE
 - Linked scene_id / character_id for re-upload context
+- `provider` + `provider_job_id` — for non-flow providers, read the provider
+  job row (`status`, `claimed_by`, `error_message`) before anything else
 
 Cross-reference `error_message` against the taxonomy below. Print: **Diagnosis / Cause / Auto-handling / Manual fix**.
 
@@ -211,6 +221,12 @@ Review runs outside the worker — no retry policy applies, the call just raises
 Providers, models and efforts come from `agent/providers.json`; see
 `/fk-change-provider`.
 
+No review CLI installed (e.g. the Muse runtime)? Use Muse review instead —
+`POST /api/videos/<VID>/review-sheets`, score the sheets by hand, then
+`POST .../review-submit`. See `/fk-review-video`. A `review` call that fails
+with "command not found" / non-zero exit before producing JSON almost always
+means the CLI binary is missing, not that the video is bad.
+
 | Error | Cause | Fix |
 |---|---|---|
 | `Frame extraction failed: ... No such filter: 'drawtext'` | ffmpeg built without libfreetype. Should no longer happen — the filter is probed and skipped — so seeing it means the probe was bypassed | `ffmpeg -filters \| grep drawtext`. Absent is fine; sheets just lose their burned-in timestamps |
@@ -233,6 +249,23 @@ Decision order — stop at first match:
 2. **`reconnected` / `disconnected` / `switched`** → PENDING, keep `retry_count`.
 3. **`captcha` / `recaptcha`** → PENDING if retry_count < 10; else FAILED.
 4. **Default** → increment `retry_count`; if < `MAX_RETRIES` (5), schedule retry at `now + min(2^retry * 10, 300)`s. Else FAILED.
+
+### H. Provider-job errors (assistant / external workers)
+
+Provider jobs live outside the worker retry policy above — the queue is
+`POST /api/provider-jobs`, the worker is `agent/worker/assistant_worker.py`.
+Check the job row first: `GET /api/provider-jobs?provider=assistant&limit=20`.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Job stuck `QUEUED` | No worker running | Start `assistant_worker.py` (see `/fk-provider`) |
+| Job stuck `CLAIMED`/`RUNNING`, `lease_expires_at` in the past | Worker died without heartbeating | Wait for expiry — another worker reclaims it automatically |
+| Job `FAILED`, `error_message` set | The worker reported a failure | Read `error_message`; fix the worker-side cause, then resubmit |
+| `409` on `/heartbeat`, `/progress`, `/complete`, `/fail` | Not the lease holder — `claimed_by` differs, or the job already left `CLAIMED`/`RUNNING` | Use the `worker_id` that claimed it; if the lease expired, re-claim |
+| Request `PROCESSING` forever but no provider job exists | Job creation failed server-side | Check server logs around the request; the `provider_job_id` column on the request row |
+| `400 Unknown provider '<name>'` | Typo, or the provider isn't registered | Names come from `GET /api/providers/status` |
+| `400 provider 'flow' does not support audio` | TTS routed to flow | Use `assistant` or `local` for `/api/tts/generate` |
+| `Cannot fetch video for scene ...` in review | Remote URL dead and no Flow fallback (not connected, or non-Flow media) | Re-check the URL; for Flow media connect the extension, for local files verify the path exists |
 
 ## Output format
 

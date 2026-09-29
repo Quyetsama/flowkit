@@ -1012,7 +1012,28 @@ async def check_omni_status(body: CheckOmniStatusRequest):
 
 @router.post("/refresh-urls/{project_id}", tags=[TAG_IMAGE, TAG_VIDEO], summary="Làm mới URL tải toàn bộ media trong project")
 async def refresh_project_urls(project_id: str):
-    """Bulk refresh all media URLs for a project via per-media get_media calls."""
+    """Bulk refresh all media URLs for a project via per-media get_media calls.
+
+    Provider-neutral no-op: when every stored URL is local (file://), there is
+    nothing to re-sign and the extension is not required.
+    """
+    from agent.db import crud
+
+    urls: list[str] = []
+    for video in await crud.list_videos(project_id):
+        for scene in await crud.list_scenes(video["id"]):
+            for k, v in scene.items():
+                if k.endswith("_url") and v:
+                    urls.append(v)
+    for char in await crud.get_project_characters(project_id):
+        for k, v in char.items():
+            if k.endswith("_url") and v:
+                urls.append(v)
+
+    if not any(u.startswith("http") for u in urls):
+        return {"refreshed": 0, "found": len(urls),
+                "skipped": "no remote media URLs (all local or none); nothing to refresh"}
+
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")

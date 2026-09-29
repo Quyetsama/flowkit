@@ -30,6 +30,7 @@ extension.crx
 *.mp4
 /*.png
 flow_session_project.json
+.venv/
 extension/_metadata/
 scratch/
 profiles.json

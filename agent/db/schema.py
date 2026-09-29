@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS video (
     horizontal_url TEXT,
     thumbnail_url TEXT,
     duration      REAL,
+    target_duration_s REAL,   -- desired final length; concat/finalize trims to it
     resolution    TEXT,
     orientation   TEXT CHECK(orientation IN ('VERTICAL','HORIZONTAL')),
     youtube_id    TEXT,
@@ -149,6 +150,7 @@ CREATE TABLE IF NOT EXISTS request (
     next_retry_at TEXT,
     edit_prompt   TEXT,    -- prompt for EDIT_IMAGE requests
     source_media_id TEXT,  -- source image media_id for EDIT_IMAGE requests
+    provider      TEXT,    -- media provider backend: flow | assistant | ...
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
@@ -158,6 +160,38 @@ CREATE INDEX IF NOT EXISTS idx_scene_order ON scene(video_id, display_order);
 CREATE INDEX IF NOT EXISTS idx_request_status ON request(status);
 CREATE INDEX IF NOT EXISTS idx_request_scene ON request(scene_id);
 CREATE INDEX IF NOT EXISTS idx_video_project ON video(project_id);
+
+-- Persistent provider jobs: the handoff queue between the FlowKit worker and
+-- external media providers/agents (assistant, HTTP workers, ...). A job is
+-- created QUEUED, claimed by a worker (claim/lease), heartbeated while
+-- running, then completed/failed/cancelled. Leases expire so crashed workers
+-- don't strand jobs — an expired lease is reclaimable.
+CREATE TABLE IF NOT EXISTS provider_job (
+    id            TEXT PRIMARY KEY,   -- ProviderJob.job_id
+    provider      TEXT NOT NULL,      -- target backend: flow | assistant | ...
+    kind          TEXT NOT NULL,      -- image | edit_image | i2v | r2v | upscale
+    status        TEXT NOT NULL DEFAULT 'QUEUED'
+                    CHECK(status IN ('QUEUED','CLAIMED','RUNNING','SUCCEEDED','FAILED','CANCELLED')),
+    prompt        TEXT NOT NULL DEFAULT '',
+    orientation   TEXT,               -- VERTICAL | HORIZONTAL
+    source_url    TEXT,               -- input image URL (edit_image)
+    start_url     TEXT,               -- start frame URL (i2v video)
+    end_url       TEXT,
+    extra         TEXT,               -- JSON: provider-specific params
+    claimed_by    TEXT,               -- worker id holding the lease
+    claimed_at    TEXT,
+    lease_expires_at TEXT,            -- heartbeat deadline; expired => reclaimable
+    progress      INTEGER NOT NULL DEFAULT 0,
+    progress_message TEXT,
+    result        TEXT,               -- JSON result payload (output_url, media_id, ...)
+    error_message TEXT,
+    retry_count   INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_job_provider_status ON provider_job(provider, status);
+CREATE INDEX IF NOT EXISTS idx_provider_job_lease ON provider_job(lease_expires_at);
 """
 
 
@@ -167,6 +201,12 @@ async def init_db():
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA foreign_keys=ON")
         await db.executescript(SCHEMA)
+        # Migration: add provider column to request table (per-request media provider)
+        cursor = await db.execute("PRAGMA table_info(request)")
+        req_columns = {row[1] for row in await cursor.fetchall()}
+        if "provider" not in req_columns:
+            await db.execute("ALTER TABLE request ADD COLUMN provider TEXT")
+            logger.info("Migrated: added provider column to request table")
         # Migration: add slug column to character table + backfill
         cursor = await db.execute("PRAGMA table_info(character)")
         columns = {row[1] for row in await cursor.fetchall()}
@@ -258,6 +298,12 @@ CREATE INDEX IF NOT EXISTS idx_request_scene ON request(scene_id);
         if "narrator_text" not in scene_columns:
             await db.execute("ALTER TABLE scene ADD COLUMN narrator_text TEXT")
             logger.info("Migrated: added narrator_text column to scene table")
+        # Migration: add start_url to provider_job table (i2v start frame)
+        cursor = await db.execute("PRAGMA table_info(provider_job)")
+        pj_columns = {row[1] for row in await cursor.fetchall()}
+        if "start_url" not in pj_columns:
+            await db.execute("ALTER TABLE provider_job ADD COLUMN start_url TEXT")
+            logger.info("Migrated: added start_url column to provider_job table")
         # Migration: add narrator fields to project table
         cursor = await db.execute("PRAGMA table_info(project)")
         project_columns = {row[1] for row in await cursor.fetchall()}
@@ -294,6 +340,10 @@ CREATE INDEX IF NOT EXISTS idx_request_scene ON request(scene_id);
                     elif scene[1] == "COMPLETED":
                         await db.execute("UPDATE video SET orientation = 'VERTICAL' WHERE id = ?", (vid,))
             logger.info("Migrated: added orientation column to video table with backfill")
+        # Migration: add target_duration_s to video table
+        if "target_duration_s" not in video_columns:
+            await db.execute("ALTER TABLE video ADD COLUMN target_duration_s REAL")
+            logger.info("Migrated: added target_duration_s column to video table")
         # Migration: create material table if missing
         cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='material'")
         if not await cursor.fetchone():

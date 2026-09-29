@@ -2,6 +2,16 @@ Generate videos with automatic scene chaining (start+end frame transitions).
 
 Usage: `/gen-chain-videos <project_id> <video_id>`
 
+## Provider (optional)
+
+Usage: `/fk-gen-chain-videos <project_id> <video_id> [--provider <name>]`
+
+Pass `"provider": "<name>"` on each item in the `/api/requests/batch`
+payload (`flow` | `assistant`; default is the server `DEFAULT_PROVIDER`).
+The assistant provider queues a provider job — make sure a worker is running
+(see `/fk-provider`). Chained start/end frames are passed as `start_url` /
+`end_url` on the provider job, so chaining works on any provider.
+
 This creates smooth transitions between scenes in a chain by using the **NEXT scene's image as the endImage** of the current scene's video, so the last frame of scene N matches the first frame of scene N+1 → seamless concat.
 
 ## Before you start: chaining is not on the new Flow API

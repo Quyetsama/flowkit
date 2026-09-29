@@ -26,6 +26,7 @@ from agent.api.materials import router as materials_router
 from agent.api.music import router as music_router
 from agent.api.models import router as models_router
 from agent.api.providers import router as providers_router
+from agent.api.provider_jobs import router as provider_jobs_router
 from agent.api.active_project import router as active_project_router
 from agent.studio.routes import router as studio_router
 from agent.worker.processor import get_worker_controller
@@ -194,6 +195,7 @@ app.include_router(reviews_router, prefix="/api")
 app.include_router(tts_router, prefix="/api")
 app.include_router(materials_router, prefix="/api")
 app.include_router(music_router, prefix="/api")
+app.include_router(provider_jobs_router, prefix="/api")
 app.include_router(models_router)
 app.include_router(providers_router)
 app.include_router(active_project_router)

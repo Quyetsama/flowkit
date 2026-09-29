@@ -1,9 +1,14 @@
-"""What each AI CLI accepts, and which one a given role runs on.
+"""What each AI reviewer accepts, and which one a given role runs on.
 
 Three CLIs back the vision work: Claude Code (`claude`), Google Antigravity
 (`agy`) and OpenAI Codex (`codex`). They disagree about almost everything —
 flag names, effort ladders, whether an unknown model slug is an error — so the
 differences live here rather than being re-derived at each call site.
+
+A fourth reviewer, `muse`, is the assistant itself (Muse): no binary, no
+model catalog, no effort ladder. It is an official provider option, not a
+default — a role pointed at `muse` means Muse scores contact sheets by
+hand via the review-sheets / review-submit endpoints (see `/fk-review-video`).
 
 Config lives in `agent/providers.json`, hot-reloaded into `config.CLI_PROVIDERS`:
 
@@ -31,6 +36,9 @@ PROVIDER_BINARIES = {
     "claude": "claude",
     "agy": "agy",
     "codex": "codex",
+    # `muse` has no binary: the reviewer IS the assistant (Muse), reading
+    # contact sheets through its own vision and scoring via review-submit.
+    "muse": None,
 }
 
 # Reasoning-effort ladders, as each CLI actually accepts them. agy's own help
@@ -42,6 +50,7 @@ PROVIDER_EFFORTS = {
     "claude": ("low", "medium", "high", "xhigh", "max"),
     "agy": ("low", "medium", "high"),
     "codex": ("low", "medium", "high", "xhigh", "max"),
+    "muse": (),
 }
 
 # agy's model slugs carry the effort in them — gemini-3.8-flash-low,
@@ -55,6 +64,7 @@ PROVIDER_MODEL_ENCODES_EFFORT = {
     "claude": False,
     "agy": True,
     "codex": False,
+    "muse": False,
 }
 
 # Whether the catalog we can list is the whole truth. agy validates --model
@@ -66,6 +76,7 @@ PROVIDER_CATALOG_IS_AUTHORITATIVE = {
     "claude": False,
     "agy": True,
     "codex": False,
+    "muse": False,
 }
 
 # Claude Code resolves these aliases itself; full model names also work, which
@@ -155,9 +166,16 @@ async def validate_role_entry(role: str, entry: dict) -> dict:
         raise ValueError(
             f"Unknown provider '{provider}' for role '{role}'. Known: {sorted(PROVIDER_BINARIES)}"
         )
-    if not shutil.which(PROVIDER_BINARIES[provider]):
+    binary = PROVIDER_BINARIES[provider]
+    if binary is not None and not shutil.which(binary):
         raise ValueError(
-            f"'{PROVIDER_BINARIES[provider]}' binary not found on PATH — install it first"
+            f"'{binary}' binary not found on PATH — install it first"
+        )
+    # `muse` (the assistant itself) needs no binary and takes no model/effort.
+    if provider == "muse" and (entry.get("model") or entry.get("effort")):
+        raise ValueError(
+            "The 'muse' reviewer is the assistant itself — it takes no model "
+            "or effort. Clear both fields."
         )
 
     effort = entry.get("effort") or None
@@ -282,6 +300,8 @@ async def list_models(provider: str, force: bool = False) -> list[dict]:
         if hit and now - hit[0] < _CATALOG_TTL_S:
             return list(hit[1])
 
+    if provider == "muse":
+        return []  # no binary, no catalog — the assistant is the reviewer
     if not shutil.which(PROVIDER_BINARIES[provider]):
         return []
 

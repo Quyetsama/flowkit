@@ -104,7 +104,7 @@ _CRITICAL_RULES = """\
 7. **Cascade on regen** — regenerating an image auto-clears downstream video + upscale.
 8. **REGENERATE vs GENERATE** — `GENERATE_*` skips if already COMPLETED. `REGENERATE_*` always runs (clears + regenerates).
 9. **Image Material required** — every project needs a `material` field (e.g. `realistic`, `3d_pixar`, `anime`). List available: `GET /api/materials`.
-10. **Server handles throttling** — worker enforces max 5 concurrent requests + 10s cooldown. Submit ALL requests via `/batch`; do NOT manually stagger or loop.
+10. **Server handles throttling (per provider)** — each media provider declares its own limits (Flow: max 5 concurrent + 10s cooldown; assistant: max 2 concurrent, no cooldown). Submit ALL requests via `/batch`; do NOT manually stagger or loop. Check effective limits: `GET /api/providers/status`.
 11. **Video prompts use sub-clip timing** — structure 8s video as time segments: `0-3s: [action]. 3-6s: [action]. 6-8s: [action].`
 12. **Character dialogue in sub-clips** — embed speech in quotes: `Luna says "Goodnight."` Max 10-15 words per character per 2-3s segment.
 13. **Scenes are mutable** — use `PATCH /api/scenes/{sid}` to update `prompt`, `video_prompt`, `narrator_text`, `character_names` after creation. Don't delete and recreate — patch instead.
@@ -167,7 +167,10 @@ def _agents_md_body(skills, title):
         f"Before ANY workflow:\n"
         f"```bash\n"
         f"curl -s http://127.0.0.1:8100/health\n"
-        f"# Must return: {{\"extension_connected\": true}}\n"
+        f"# Flow mode must return: {{\"extension_connected\": true}}\n"
+        f"# Assistant mode (MEDIA_PROVIDER=assistant or provider=assistant per request):\n"
+        f"# extension_connected may be false — no Chrome extension needed.\n"
+        f"# Check provider status instead: GET /api/providers/status\n"
         f"```\n\n"
         f"{_CRITICAL_RULES}\n"
         f"{_PIPELINE_OVERVIEW}\n"

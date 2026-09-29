@@ -25,6 +25,7 @@ Workflow skills for AI agents and humans. Each skill is a step-by-step recipe.
 | Skill | File | Description |
 |-------|------|-------------|
 | `fk-camera-guide` | [fk-camera-guide.md](fk-camera-guide.md) | Camera angles, movements, lighting, DOF for cinematic video prompts |
+| `fk-provider` | [fk-provider.md](fk-provider.md) | Media providers: choose the generation backend, run the assistant worker, troubleshoot provider jobs |
 
 ## Utilities
 

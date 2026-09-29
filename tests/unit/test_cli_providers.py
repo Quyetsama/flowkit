@@ -867,6 +867,39 @@ class TestValidateRoleEntry:
 
 
 # ---------------------------------------------------------------------------
+class TestMuseReviewer:
+    """`muse` — the assistant itself — is a first-class reviewer with no binary."""
+
+    @pytest.mark.asyncio
+    async def test_muse_needs_no_binary_on_path(self, monkeypatch):
+        monkeypatch.setattr(cli_providers.shutil, "which", lambda b: None)
+        entry = await cli_providers.validate_role_entry(
+            "video_review", {"provider": "muse"})
+        assert entry["provider"] == "muse"
+
+    @pytest.mark.asyncio
+    async def test_muse_rejects_model_and_effort(self):
+        with pytest.raises(ValueError, match="takes no model"):
+            await cli_providers.validate_role_entry(
+                "video_review", {"provider": "muse", "model": "sonnet"})
+        with pytest.raises(ValueError, match="takes no model"):
+            await cli_providers.validate_role_entry(
+                "video_review", {"provider": "muse", "effort": "high"})
+
+    @pytest.mark.asyncio
+    async def test_muse_catalog_is_empty(self):
+        assert await cli_providers.list_models("muse") == []
+
+    def test_muse_is_a_known_provider(self):
+        assert cli_providers.PROVIDER_BINARIES["muse"] is None
+
+    @pytest.mark.asyncio
+    async def test_analyze_cli_refuses_muse_with_directions(self):
+        with pytest.raises(RuntimeError, match="review-sheets"):
+            await _analyze_cli(
+                [], 10, 4.0, {}, role={"provider": "muse"})
+
+
 # agent/services/cli_providers.py :: model catalogs
 # ---------------------------------------------------------------------------
 

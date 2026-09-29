@@ -1,7 +1,10 @@
 import json
 import logging
 import re
+import shutil
 from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse
 
 import aiohttp
 from fastapi import APIRouter, HTTPException
@@ -150,11 +153,9 @@ def _get_repo() -> SQLiteRepository:
 @router.post("", response_model=Project)
 async def create(body: ProjectCreate):
     from agent.materials import get_material
+    import uuid as _uuid
 
-    # Step 1: Create project on Google Flow to get the real projectId
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected — cannot create project on Google Flow")
 
     # Resolve material (support legacy style field + material field)
     material_id = _resolve_material_id(body.material)
@@ -170,20 +171,27 @@ async def create(body: ProjectCreate):
             dupes = [s for s in slugs if slugs.count(s) > 1]
             raise HTTPException(400, f"Duplicate character slugs: {list(set(dupes))}")
 
-    detected_tier = await _detect_user_tier(client)
-
-    # Explicit flow_project_id means intentional reuse. Otherwise create a
-    # fresh real Flow project so unrelated jobs do not accumulate forever in
-    # one project listing.
+    # Provider-aware project identity.
+    # 1. Explicit flow_project_id -> intentional reuse (no extension needed).
+    # 2. Extension connected -> create a fresh real Flow project (legacy path).
+    # 3. Otherwise -> local-only project with a minted UUID. This is the
+    #    assistant-mode path: no Chrome, no Flow sign-in required. Generation
+    #    requests for it should use a non-flow provider.
+    detected_tier = body.user_paygate_tier
     flow_project_id = client.flow_project_id(body.flow_project_id) if body.flow_project_id else None
     if flow_project_id:
         logger.info("Flow project reused: %s", flow_project_id)
-    else:
+    elif client.connected:
+        detected_tier = await _detect_user_tier(client)
         flow_result = await client.create_project(body.name, body.tool_name)
         if flow_result.get("error"):
             raise HTTPException(502, f"Flow API error: {flow_result['error']}")
         flow_project_id = _read_flow_project_id(flow_result)
         logger.info("Flow project created: %s", flow_project_id)
+    else:
+        flow_project_id = str(_uuid.uuid4())
+        logger.info("Extension not connected — creating local-only project %s",
+                    flow_project_id)
 
     repo = _get_repo()
 
@@ -345,6 +353,7 @@ class ThumbnailRequest(BaseModel):
     character_names: list[str] = []
     aspect_ratio: str = "LANDSCAPE"
     output_filename: str = "thumbnail.png"
+    provider: str | None = None  # default: DEFAULT_PROVIDER
 
 
 class ThumbnailResponse(BaseModel):
@@ -358,17 +367,16 @@ class ThumbnailResponse(BaseModel):
 
 @router.post("/{pid}/generate-thumbnail", response_model=ThumbnailResponse)
 async def generate_thumbnail(pid: str, body: ThumbnailRequest):
-    """Generate a thumbnail image for a project via Google Flow API (synchronous, no queue)."""
+    """Generate a thumbnail image via the selected media provider (synchronous, no queue)."""
     import logging
     logger = logging.getLogger(__name__)
+    from agent.config import DEFAULT_PROVIDER
     from agent.materials import get_material
+    from agent.sdk.services.operations import get_operations
+    from agent.sdk.services.provider_base import KIND_IMAGE, ProviderJob
     from agent.sdk.services.result_handler import parse_result
 
     logger.info("generate_thumbnail: started for project %s", pid)
-
-    client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
 
     repo = _get_repo()
     project = await repo.get_project(pid)
@@ -381,8 +389,9 @@ async def generate_thumbnail(pid: str, body: ThumbnailRequest):
     scene_prefix = material["scene_prefix"] if material and material.get("scene_prefix") else ""
     full_prompt = f"{scene_prefix} {body.prompt}".strip() if scene_prefix else body.prompt
 
-    # Resolve character reference media_ids (error if any named entity is missing media_id)
+    # Resolve character references (media_ids for Flow, image URLs for assistant).
     character_media_ids = None
+    reference_urls: list[str] = []
     if body.character_names:
         entities = await repo.get_project_characters(pid)
         valid_ids = []
@@ -390,51 +399,78 @@ async def generate_thumbnail(pid: str, body: ThumbnailRequest):
         for entity in entities:
             name = entity["name"] if isinstance(entity, dict) else entity.name
             mid = entity.get("media_id") if isinstance(entity, dict) else getattr(entity, "media_id", None)
+            ref_url = (entity.get("reference_image_url") if isinstance(entity, dict)
+                       else getattr(entity, "reference_image_url", None))
             char_slug = (entity.get("slug") if isinstance(entity, dict) else getattr(entity, "slug", None)) or ""
             if not ((char_slug and char_slug in body.character_names) or (name and name in body.character_names)):
                 continue
             if mid:
                 valid_ids.append(mid)
-            else:
+            if ref_url:
+                reference_urls.append(ref_url)
+            if not mid and not ref_url:
                 missing.append(name)
         if missing:
             raise HTTPException(400, f"Missing reference images for: {', '.join(missing)}. Generate ref images first.")
         character_media_ids = valid_ids if valid_ids else None
 
-    aspect_ratio = _ASPECT_RATIO_MAP.get(body.aspect_ratio.upper(), "IMAGE_ASPECT_RATIO_LANDSCAPE")
+    provider_name = (body.provider or DEFAULT_PROVIDER).strip().lower()
+    registry = get_operations().registry
+    provider = registry.get(provider_name)
+    if provider is None:
+        raise HTTPException(400, f"Unknown provider '{provider_name}' (available: {registry.names()})")
+
+    aspect_key = body.aspect_ratio.upper()
+    aspect = _ASPECT_RATIO_MAP.get(aspect_key, "IMAGE_ASPECT_RATIO_LANDSCAPE")
+    orientation = "VERTICAL" if aspect_key == "PORTRAIT" else "HORIZONTAL"
     tier = getattr(project, "user_paygate_tier", "PAYGATE_TIER_TWO") or "PAYGATE_TIER_TWO"
 
-    logger.info("generate_thumbnail: calling generate_images prompt=%s refs=%s", full_prompt[:60], character_media_ids)
-    raw = await client.generate_images(
+    job = ProviderJob(
+        job_id=f"thumb-{pid[:8]}-{aspect_key.lower()}",
+        kind=KIND_IMAGE,
         prompt=full_prompt,
-        project_id=pid,
-        aspect_ratio=aspect_ratio,
-        user_paygate_tier=tier,
-        character_media_ids=character_media_ids,
+        orientation=orientation,
+        reference_urls=tuple(reference_urls),
+        extra={"project_id": pid, "aspect": aspect, "tier": tier,
+               "character_media_ids": character_media_ids},
     )
-    logger.info("generate_thumbnail: generate_images returned, error=%s", raw.get("error") if isinstance(raw, dict) else "n/a")
+    blocked = provider.check(job)
+    if blocked:
+        # Keep the historical 503 for a disconnected Flow extension.
+        raise HTTPException(503 if provider_name == "flow" else 400, blocked)
+
+    logger.info("generate_thumbnail: provider=%s prompt=%s refs=%s",
+                provider_name, full_prompt[:60], len(reference_urls))
+    raw = await provider.run(job)
+    logger.info("generate_thumbnail: provider returned, error=%s", raw.get("error") if isinstance(raw, dict) else "n/a")
 
     gen_result = parse_result(raw, "GENERATE_IMAGE")
     if not gen_result.success:
         raise HTTPException(502, gen_result.error or "Image generation failed")
 
-    # Download and save to output/{project_name}/thumbnails/{filename}
+    # Save to output/{project_name}/thumbnails/{filename}
     project_name = slugify(getattr(project, "name", "project"))
     out_dir = BASE_DIR / "output" / project_name / "thumbnails"
     out_dir.mkdir(parents=True, exist_ok=True)
     output_path = out_dir / body.output_filename
 
-    if gen_result.url and gen_result.url.startswith("http"):
-        try:
-            connector = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.get(gen_result.url) as resp:
-                    if resp.status == 200:
-                        output_path.write_bytes(await resp.read())
-                    else:
-                        raise HTTPException(502, f"Failed to download image: HTTP {resp.status}")
-        except aiohttp.ClientError as e:
-            raise HTTPException(502, f"Failed to download image: {e}") from e
+    if gen_result.url:
+        if gen_result.url.startswith("http"):
+            try:
+                connector = aiohttp.TCPConnector(ssl=False)
+                async with aiohttp.ClientSession(connector=connector) as session:
+                    async with session.get(gen_result.url) as resp:
+                        if resp.status == 200:
+                            output_path.write_bytes(await resp.read())
+                        else:
+                            raise HTTPException(502, f"Failed to download image: HTTP {resp.status}")
+            except aiohttp.ClientError as e:
+                raise HTTPException(502, f"Failed to download image: {e}") from e
+        elif gen_result.url.startswith("file://"):
+            src = Path(urlparse(gen_result.url).path)
+            if not src.is_file():
+                raise HTTPException(502, f"Provider returned missing file: {gen_result.url}")
+            shutil.copy2(src, output_path)
 
     return ThumbnailResponse(
         success=True,

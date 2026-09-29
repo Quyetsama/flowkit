@@ -132,6 +132,75 @@ Then open `https://flow.google.com/` and sign in to the Google account you want 
 
 ### 4. Start FlowKit
 
+| Env var | Default | What it does |
+|---------|---------|--------------|
+| `FLOW_PROJECT_ID` | — | The Flow project every RPC is scoped to. Required. |
+| `FLOW_ALLOW_DEGRADED` | `0` | `1` lets scene chaining and r2v fall back to plain i2v instead of failing. |
+| `DEFAULT_PAYGATE_TIER` | `PAYGATE_TIER_TWO` | Carried for the DB and dashboard; no longer selects a model. |
+| `MEDIA_PROVIDER` | `flow` | `flow` (Google Flow via extension) or `assistant` (route all generation to the AI assistant). |
+| `ASSISTANT_PROVIDER_TIMEOUT_S` | `1800` | How long a request waits for a worker to complete its provider job before failing. |
+| `ASSISTANT_PROVIDER_POLL_S` | `15` | How often to poll the provider-job row while waiting for completion. |
+
+### Assistant Media Provider (`MEDIA_PROVIDER=assistant`)
+
+Routes every generation call — reference images, scene images, edits, i2v, r2v —
+to the AI assistant instead of Google Flow. No Chrome extension or Flow sign-in
+needed; the worker, skills, dashboard, and concat pipeline work unchanged.
+
+Protocol (persistent provider-job queue + HTTP API):
+
+1. Each request is inserted as a `QUEUED` row in the `provider_job` table with the
+   full prompt, orientation, input URLs (`source_url` for edits, `start_url`/`end_url`
+   for video, `extra.reference_urls` for reference images).
+2. An external worker (the assistant) long-polls
+   `GET /api/provider-jobs/wait-next?provider=assistant&worker_id=<id>`, claims the
+   job (lease granted), heartbeats while working, and finishes with
+   `POST /api/provider-jobs/{id}/complete` carrying
+   `{"worker_id": "<id>", "result": {"output_url": "<file:// or https:// URL>", "media_id": "<uuid>"}}`
+   (or `/fail` with `{"worker_id": "<id>", "error": "..."}`).
+   Only the lease holder may heartbeat/progress/complete/fail (409 otherwise);
+   complete/fail are idempotent for the holder.
+3. The provider mints a UUID `media_id` when the worker omits one and records the
+   output URL — the DB rows look identical to Flow-generated ones, so concat and
+   upload keep working. Expired leases are reclaimable, so crashed workers never
+   strand jobs.
+
+See `agent/worker/assistant_worker.py` for a reference worker implementing the
+worker side of the protocol. Video upscale is not supported on this provider and
+fails loudly.
+
+### Post-production (provider-neutral)
+
+Concat, finalize, and review work on clips from any provider — each clip is
+normalized to H.264/yuv420p + AAC before merging, so Flow and assistant clips
+can be mixed in one timeline.
+
+```bash
+# Merge scene clips in display_order; trim to the video's target_duration_s
+curl -X POST http://127.0.0.1:8100/api/videos/<VID>/concat \
+  -H "Content-Type: application/json" \
+  -d '{"orientation": "VERTICAL", "target_duration_s": 60}'
+
+# Concat + optional music/narration mix, marks the video COMPLETED
+curl -X POST http://127.0.0.1:8100/api/videos/<VID>/finalize \
+  -H "Content-Type: application/json" \
+  -d '{"orientation": "VERTICAL", "target_duration_s": 60,
+       "music_path": "/path/to/music.mp3", "narrate": true}'
+
+# Review scene videos, then auto-enqueue REGENERATE_VIDEO for bad scenes
+# (bounded: at most max_regenerations regen requests per scene, ever)
+curl -X POST http://127.0.0.1:8100/api/videos/<VID>/review-regenerate \
+  -H "Content-Type: application/json" \
+  -d '{"project_id": "<PID>", "mode": "light", "max_regenerations": 1}'
+```
+
+`target_duration_s` can also be stored on the video itself (`POST /api/videos`
+/ `PATCH /api/videos/<VID>`) — concat/finalize fall back to it when the
+request omits a target. Review accepts `file://` clip URLs directly, so
+assistant-provider output needs no download step; the Flow `get_media`
+fallback only runs when the extension is connected.
+
+
 ```bash
 source venv/bin/activate
 python -m agent.main
@@ -258,6 +327,205 @@ curl -X POST http://127.0.0.1:8100/api/flow/generate-video \
 ```
 
 For first+last frame and multi-reference / Ingredients modes, see [`docs/OMNI_FLASH.md`](docs/OMNI_FLASH.md).
+
+---
+
+## Core Concepts
+
+### Reference Image System
+
+Every visual element that should stay consistent gets a **reference image** — characters, locations, props. Each reference has a UUID `media_id` used in all scene generations via `imageInputs`.
+
+| Entity Type | Aspect Ratio | Composition |
+|-------------|-------------|-------------|
+| `character` | Portrait | Full body head-to-toe, front-facing, centered |
+| `location` | Landscape | Establishing shot, level horizon, atmospheric |
+| `creature` | Portrait | Full body, natural stance, distinctive features |
+| `visual_asset` | Portrait | Detailed view, textures, scale reference |
+
+### Scene Prompts = Action Only
+
+Scene prompts describe **what happens**, not character appearance. The reference images maintain visual consistency.
+
+```
+DO:   "Pippip juggling fish at Fish Stall, crowd watching in Open Market"
+DON'T: "Pippip the chubby orange tabby cat wearing a blue apron juggling..."
+```
+
+### Media ID = UUID
+
+All `media_id` values are UUID format (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`). Never the base64 `CAMS...` mediaGenerationId.
+
+### Two Prompts per Scene
+
+Each scene has **two separate prompts**:
+- `prompt` — describes the **still image** (frame 0): `"Luna steps out of rocket onto candy planet. Wide shot, sunrise."`
+- `video_prompt` — describes the **8s video motion** with sub-clip timing and camera directions:
+
+```
+0-3s: Wide crane down, Luna steps out of rocket onto Candy Planet Surface. Luna gasps "It's beautiful!"
+3-6s: Low angle tracking shot, Luna walks across candy ground, shallow DOF. Luna says "Everything is made of candy."
+6-8s: Close-up Luna's face, eyes wide with wonder, golden hour backlight. Silence, ambient wind.
+```
+
+### Character Voice
+
+Characters can have a `voice_description` (max ~30 words) for voice consistency:
+```json
+{"name": "Luna", "entity_type": "character", "description": "Small white cat...", "voice_description": "Soft curious childlike voice with wonder and slight purring"}
+```
+
+Voice descriptions are auto-appended to video prompts before generation.
+
+### No Background Music
+
+The worker auto-appends `"No background music. Keep only natural sound effects and ambient sounds."` to all video prompts. Sound effects from the scene (footsteps, splashing, wind) are preserved.
+
+## Pipeline Overview
+
+```
+1. Create project      POST /api/projects (with entities + story)
+2. Create video        POST /api/videos
+3. Create scenes       POST /api/scenes (chain_type: ROOT → CONTINUATION)
+4. Gen ref images      POST /api/requests {type: GENERATE_CHARACTER_IMAGE} per entity
+   → Wait ALL complete, verify all have UUID media_id
+5. Gen scene images    POST /api/requests {type: GENERATE_IMAGE} per scene
+   → Wait ALL complete
+6. Gen videos          POST /api/requests {type: GENERATE_VIDEO} per scene
+   → Wait ALL complete (2-5 min each)
+7. (Optional) Upscale  POST /api/requests {type: UPSCALE_VIDEO} (TIER_TWO only)
+8. Download + concat   ffmpeg normalize + concat
+```
+
+## Skills (AI Agent Workflows)
+
+Ready-to-use workflow recipes in `skills/` (also available as `/slash-commands` in Claude Code):
+
+### Basic Pipeline
+
+| Skill | Description |
+|-------|-------------|
+| `/fk-create-project` | Create project + entities + video + scenes interactively |
+| `/fk-research` | Fact-check story details before scripting |
+| `/fk-gen-refs` | Generate reference images for all entities |
+| `/fk-gen-images` | Generate scene images with character refs |
+| `/fk-gen-videos` | Generate videos from scene images (4K upscale via `UPSCALE_VIDEO` request, `PAYGATE_TIER_TWO`) |
+| `/fk-concat` | Download + merge all scene videos |
+| `/fk-pipeline` | Smart full-pipeline orchestrator — runs the whole chain end to end |
+| `/fk-monitor` | Live monitor for a running pipeline |
+
+### Advanced Video
+
+| Skill | Description |
+|-------|-------------|
+| `/fk-gen-chain-videos` | Auto start+end frame chaining for smooth transitions (i2v_fl) |
+| `/fk-insert-scene` | Multi-angle shots, cutaways, close-ups within a chain |
+| `/fk-creative-mix` | Analyze story + suggest all techniques (chain, insert, r2v, parallel) |
+
+### Review & Quality
+
+| Skill | Description |
+|-------|-------------|
+| `/fk-review-video` | AI vision scoring of generated scene videos (quality, consistency, usability) — see [AI Vision Providers](#ai-vision-providers-video-review) below |
+| `/fk-review-board` | Visual scene-by-scene review board for feedback before locking a cut |
+| `/fk-change-provider` | View/switch the reviewer (`muse` = the assistant itself, or an AI CLI), model and effort behind `/fk-review-video` |
+
+### Reference
+
+| Skill | Description |
+|-------|-------------|
+| `/fk-camera-guide` | Camera angles, movements, lighting, DOF for cinematic video prompts |
+| `/fk-thumbnail-guide` | Hook-worthy thumbnail design rules |
+| `/fk-provider` | Media providers: choose the generation backend (`flow`/`assistant`), run the assistant worker, troubleshoot provider jobs |
+
+### TTS & Narration
+
+| Skill | Description |
+|-------|-------------|
+| `/fk-gen-tts-template` | Create a voice template for consistent narration |
+| `/fk-import-voice` | Import an existing voice recording as a template |
+| `/fk-gen-narrator` | Generate narrator text + TTS for all scenes |
+| `/fk-gen-text-overlays` | Generate text overlays from narrator text (dates, locations, stats) |
+| `/fk-concat-fit-narrator` | Trim scene videos to fit narrator duration, then concat |
+| `/fk-gen-music` | Generate background music via Suno |
+
+### YouTube
+
+| Skill | Description |
+|-------|-------------|
+| `/fk-youtube-seo` | Generate SEO-optimized title, description, tags |
+| `/fk-brand-logo` | Apply channel icon watermark to video/thumbnails |
+| `/fk-youtube-upload` | Upload to YouTube with rule validation + scheduling |
+| `/fk-thumbnail` | Generate YouTube-optimized thumbnails |
+
+### Utilities
+
+| Skill | Description |
+|-------|-------------|
+| `/fk-status` | Full project dashboard + recommended next action |
+| `/fk-switch-project` | Switch the active project |
+| `/fk-fix-uuids` | Repair any CAMS... media_ids to UUID format |
+| `/fk-refresh-urls` | Refresh expired GCS signed URLs for images/videos |
+| `/fk-upload-image` | Upload a local image to get a `media_id` |
+| `/fk-add-material` | Image material system |
+| `/fk-change-model` | View/switch video, image, and upscale model keys |
+| `/fk-dashboard` | Live status in the Claude Code statusline |
+| `/fk-doctor` | Diagnose any error (Flow API, extension, worker, YouTube) and prescribe a fix |
+
+### Muse Support
+
+Muse is a first-class FlowKit agent, not just another skill reader:
+
+- **Skills run natively** — no shelling out, no slash-command wiring.
+  Muse reads `skills/fk-*.md` and calls its own tools directly, including
+  vision on files (`muse.read` for contact sheets and images).
+- **`muse` is an official video-review provider** — no CLI, no model, no API
+  key. It scores review contact sheets by hand through
+  `POST .../review-sheets` → vision → `POST .../review-submit`
+  (see `/fk-review-video --by muse`). Opt in per role with
+  `/fk-change-provider set muse`; the default role stays on `claude`.
+
+### AI CLI Compatibility (Skill Consumption)
+
+Skills are `.md` recipes any AI coding-assistant CLI can read and follow — this is about **which agent reads the skill files**, not which model does the work:
+
+| CLI | Instructions | How skills work |
+|-----|-------------|-----------------|
+| Muse | Skills auto-loaded | Native tool calls (`muse.read` for files/images) |
+| Claude Code | `CLAUDE.md` (auto-loaded) | Native `/fk-*` slash commands |
+| Codex CLI | `AGENTS.md` → reads `CLAUDE.md` | User says `/fk-<name>`, agent reads `skills/fk-<name>.md` |
+
+The Gemini CLI target was dropped in v1.3.1 — the CLI is retired, and its
+replacement `agy` reads none of what that target generated (see the changelog).
+`agy` is still supported, as one of the three CLIs that can run video review —
+that is configured in `agent/providers.json`, not by `setup.py`.
+
+### AI Vision Providers (Video Review)
+
+Separate from the table above — this is about **which backend does the vision analysis** for `/fk-review-video`. Four reviewers are supported and swappable at runtime, no restart required:
+
+| Provider | Binary | Reasoning efforts | Model catalog | Setup |
+|----------|--------|-------------------|---------------|-------|
+| `muse` | — (the assistant itself) | — | — | Official — Muse reads the contact sheets with its own vision via `POST .../review-sheets` → `POST .../review-submit`; no CLI, no API key. Opt in per role (`/fk-change-provider set muse`) |
+| `claude` | Claude Code CLI | `low` `medium` `high` `xhigh` `max` | aliases (`sonnet`, `opus`, `haiku`, `fable`) or any full model name | Install the CLI, sign in once |
+| `agy` | Google Antigravity CLI | `low` `medium` `high` | closed — `agy models` is the whole list and agy rejects anything else | Install separately, sign in once |
+| `codex` | OpenAI Codex CLI | `low` `medium` `high` `xhigh` `max` (varies per model) | codex's own on-disk cache, plus slugs newer than it | `npm install -g @openai/codex`, then `codex login` once |
+
+Provider, model and effort are set **per role** — a role being a job an AI
+does for Flow Kit. There is one today, `video_review`; the config is a map so
+the next one is an entry rather than a schema change. Model and effort may both
+be `null`, meaning "whatever that backend defaults to". The `muse` reviewer
+takes no model or effort — it is Muse scoring contact sheets by hand, so
+pointing `video_review` at `muse` disables the CLI review endpoint (it
+answers 500 with directions) and the review flow becomes
+`review-sheets` → hand scoring → `review-submit`.
+
+**For `agy`, model and effort are mutually exclusive.** Its slugs name their own
+effort — `gemini-3.8-flash-low`, `gemini-3.1-pro-high` — so setting both is
+rejected (`--model gpt-oss-120b-medium conflicts with --effort=low`), and a slug
+with no effort in its name refuses `--effort` outright
+(`--effort is not supported for model "claude-sonnet-4-6"`). Pick a model, or
+pick an effort and let agy choose the model. The API answers 400 for the pair.
 
 ### Read the active Google account
 

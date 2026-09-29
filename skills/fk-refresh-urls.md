@@ -10,6 +10,27 @@ Usage: `/fk-refresh-urls <video_id> [--project-id <PID>]`
 
 ## Pre-flight
 
+### Step 0: Skip when all URLs are local (provider no-op)
+
+Assistant-provider media is stored as `file://` URLs, which never expire —
+refreshing them is a no-op. Check first:
+
+```bash
+curl -s "http://127.0.0.1:8100/api/scenes?video_id=${VID}" | python3 -c "
+import sys, json
+scenes = json.load(sys.stdin)
+urls = [v for s in scenes for k, v in s.items()
+        if k.endswith('_url') and v]
+remote = [u for u in urls if u.startswith('http')]
+print(f'{len(urls)} urls, {len(remote)} remote')
+"
+# If remote == 0: STOP. Nothing to refresh — all media is local.
+```
+
+Only continue below when remote URLs exist (Flow's signed GCS URLs expire
+after hours/days).
+
+
 ```bash
 curl -s http://127.0.0.1:8100/api/flow/status
 # Must show: {"connected": true, "transport": "batch"}

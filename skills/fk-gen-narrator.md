@@ -188,6 +188,15 @@ The `ref_text` is the **exact transcript** of what's spoken in `ref_audio`.
 - If template was created via `/fk-gen-tts-template`: `ref_text` = the standard base transcript used during creation (stored in `templates.json`)
 - If template is a user-provided WAV: transcribe it first using whisper, then use that transcript as `ref_text` for all scenes
 
+### Provider (optional)
+
+Usage: `/fk-gen-narrator <video_id> [--provider <name>] [--force] [--language vi] [--speed 1.1]`
+
+Add `"provider": "<name>"` to the `/api/tts/generate` payload to route TTS
+through a provider job (`assistant`) instead of the local OmniVoice engine —
+the worker's provider must support audio (`generate_audio` capability). Omit
+it for local TTS. `flow` cannot do audio and is rejected with 400.
+
 ### Key rules:
 - `ref_audio` = the voice template WAV file (voice timbre source)
 - `ref_text` = exact transcript of `ref_audio` (phoneme alignment)

@@ -63,13 +63,32 @@ FLOW_RISK_STATE_FILE = (
 # are fixed — so it is only carried for the DB column and the dashboard.
 DEFAULT_PAYGATE_TIER = os.environ.get("DEFAULT_PAYGATE_TIER", "PAYGATE_TIER_TWO")
 
+# ─── Media Provider ─────────────────────────────────────────
+# "flow" (default): generate via Google Flow through the Chrome extension.
+# "assistant": route all generation to the AI assistant instead — each request
+# is published as a row in the provider_job table and the worker waits for an
+# external worker (the assistant) to claim and complete it via
+# /api/provider-jobs. See agent/sdk/services/assistant_provider.py and
+# agent/worker/assistant_worker.py for the full protocol.
+# Default media provider for requests that don't specify one ("flow" |
+# "assistant" | any registered provider name). MEDIA_PROVIDER is kept as a
+# legacy alias — DEFAULT_PROVIDER wins if both are set.
+DEFAULT_PROVIDER = os.environ.get(
+    "DEFAULT_PROVIDER", os.environ.get("MEDIA_PROVIDER", "flow")
+).strip().lower()
+MEDIA_PROVIDER = DEFAULT_PROVIDER  # legacy alias
+ASSISTANT_PROVIDER_TIMEOUT_S = int(os.environ.get("ASSISTANT_PROVIDER_TIMEOUT_S", "1800"))
+ASSISTANT_PROVIDER_POLL_S = int(os.environ.get("ASSISTANT_PROVIDER_POLL_S", "15"))
+ASSISTANT_MAX_CONCURRENT = int(os.environ.get("ASSISTANT_MAX_CONCURRENT", "2"))
+ASSISTANT_COOLDOWN_S = float(os.environ.get("ASSISTANT_COOLDOWN_S", "0"))
+
 # ─── Worker ──────────────────────────────────────────────────
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 VIDEO_POLL_INTERVAL = int(os.environ.get("VIDEO_POLL_INTERVAL", "10"))  # polling interval for video/upscale status
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "5"))
 VIDEO_POLL_TIMEOUT = int(os.environ.get("VIDEO_POLL_TIMEOUT", "420"))
-API_COOLDOWN = int(os.environ.get("API_COOLDOWN", "10"))  # seconds between API calls (anti-spam)
-MAX_CONCURRENT_REQUESTS = int(os.environ.get("MAX_CONCURRENT_REQUESTS", "5"))  # Google Flow max parallel requests
+API_COOLDOWN = int(os.environ.get("API_COOLDOWN", "10"))  # DEPRECATED: per-provider cooldown_s in provider capabilities is authoritative
+MAX_CONCURRENT_REQUESTS = int(os.environ.get("MAX_CONCURRENT_REQUESTS", "5"))  # DEPRECATED: per-provider max_concurrent in provider capabilities is authoritative
 STALE_PROCESSING_TIMEOUT = int(os.environ.get("STALE_PROCESSING_TIMEOUT", "600"))  # 10 min
 
 # ─── Model Keys (loaded from models.json for easy updates) ──

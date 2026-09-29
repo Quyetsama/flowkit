@@ -17,6 +17,46 @@ def _clamp_float(value: float, name: str, lo: float = _FLOAT_MIN, hi: float = _F
     return value
 
 
+def probe_duration(path: str) -> float | None:
+    """Return media duration in seconds via ffprobe, or None on failure."""
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        return float(probe.stdout.strip())
+    except (ValueError, AttributeError, subprocess.SubprocessError, OSError):
+        logger.error("probe_duration failed for %s", path)
+        return None
+
+
+def normalize_clip(input_path: str, output_path: str, size: str | None = None,
+                   fps: int = 30) -> bool:
+    """Re-encode one clip to uniform h264/yuv420p + AAC so concat -c copy is safe.
+
+    Clips from different providers (Flow vs assistant) may differ in codec,
+    pixel format, or timebase; normalizing first avoids concat failures.
+    """
+    cmd = ["ffmpeg", "-y", "-i", str(input_path),
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(int(fps)),
+           "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+           "-movflags", "+faststart"]
+    if size:
+        cmd += ["-vf", f"scale={size}:force_original_aspect_ratio=decrease,"
+                       f"pad={size}:(ow-iw)/2:(oh-ih)/2"]
+    cmd.append(str(output_path))
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except (subprocess.SubprocessError, OSError) as e:
+        logger.error("Normalize failed for %s: %s", input_path, e)
+        return False
+    if result.returncode != 0:
+        logger.error("Normalize failed for %s: %s", input_path, result.stderr[-300:])
+        return False
+    return True
+
+
 def trim_video(input_path: str, output_path: str, start: float, end: float) -> bool:
     """Trim video to [start, end] seconds."""
     if not Path(input_path).exists():

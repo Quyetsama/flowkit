@@ -14,7 +14,7 @@ import aiohttp
 from agent.db import crud
 from agent.services.flow_client import get_flow_client
 from agent.services.event_bus import event_bus
-from agent.config import POLL_INTERVAL, MAX_RETRIES, API_COOLDOWN, MAX_CONCURRENT_REQUESTS
+from agent.config import POLL_INTERVAL, MAX_RETRIES
 from agent.worker._parsing import _is_error
 from agent.sdk.services.result_handler import parse_result, apply_scene_result, apply_character_result
 
@@ -53,13 +53,35 @@ class APIRateLimiter:
         self._semaphore.release()
 
 
+def _request_provider_name(req: dict) -> str:
+    """Provider backend for a request row (persisted per request)."""
+    from agent.config import DEFAULT_PROVIDER
+    return ((req.get("provider") or DEFAULT_PROVIDER) or "").strip().lower() or "flow"
+
+
+def _get_registry():
+    """Shared provider registry (via the SDK singleton when initialized)."""
+    try:
+        from agent.sdk.services.operations import get_operations
+        return get_operations().registry
+    except RuntimeError:
+        # SDK not initialized (e.g. unit tests) — build a standalone one.
+        from agent.sdk.services.registry import ProviderRegistry
+        from agent.services.flow_client import get_flow_client
+        return ProviderRegistry(get_flow_client())
+
+
 class WorkerController:
     """Controls the background worker loop with rate limiting and graceful shutdown."""
 
     def __init__(self):
         self._shutdown = asyncio.Event()
         self._active_ids: set[str] = set()
-        self._rate_limiter = APIRateLimiter(MAX_CONCURRENT_REQUESTS, API_COOLDOWN)
+        self._active_provider: dict[str, str] = {}  # rid -> provider name
+        # Per-provider rate limiters, built lazily from provider capabilities
+        # (Flow: 5 concurrent + 10s cooldown; assistant: 2 concurrent, no
+        # cooldown). Replaces the old single global limiter.
+        self._limiters: dict[str, APIRateLimiter] = {}
         self._deferred: dict[str, float] = {}  # rid -> defer_until timestamp
         self._retry_after: dict[str, float] = {}  # rid -> retry_after timestamp
 
@@ -67,6 +89,19 @@ class WorkerController:
     def active_count(self) -> int:
         """Number of currently active requests."""
         return len(self._active_ids)
+
+    def _limiter_for(self, provider_name: str, max_concurrent: int,
+                     cooldown_s: float) -> APIRateLimiter:
+        limiter = self._limiters.get(provider_name)
+        if limiter is None:
+            limiter = APIRateLimiter(max_concurrent, cooldown_s)
+            self._limiters[provider_name] = limiter
+            logger.info("Rate limiter for provider '%s': max_concurrent=%d cooldown=%.1fs",
+                        provider_name, max_concurrent, cooldown_s)
+        return limiter
+
+    def _active_for_provider(self, provider_name: str) -> int:
+        return sum(1 for p in self._active_provider.values() if p == provider_name)
 
     async def start(self):
         """Start the worker loop."""
@@ -99,38 +134,37 @@ class WorkerController:
             logger.warning("Could not clean up stale requests: %s", e)
 
     async def _run_loop(self):
-        client = get_flow_client()
+        registry = _get_registry()
 
         while not self._shutdown.is_set():
             try:
-                if not client.connected:
-                    await asyncio.sleep(POLL_INTERVAL)
-                    continue
-
                 now = time.time()
-                slots_available = MAX_CONCURRENT_REQUESTS - len(self._active_ids)
-                if slots_available <= 0:
+
+                # Fetch a generous window of actionable requests; per-request
+                # provider gating below decides what actually runs.
+                fetch_limit = 0
+                for name in registry.names():
+                    caps = registry.get(name).capabilities
+                    fetch_limit += max(0, caps.max_concurrent - self._active_for_provider(name))
+                if fetch_limit <= 0:
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
 
                 pending = await crud.list_actionable_requests(
-                    exclude_ids=self._active_ids, limit=slots_available
+                    exclude_ids=self._active_ids, limit=fetch_limit
                 )
 
                 pending_count = len(pending)
                 await event_bus.emit("worker_tick", {
                     "active": len(self._active_ids),
-                    "slots": slots_available,
                     "pending": pending_count,
                 })
 
                 if pending:
-                    logger.info("Worker: %d actionable, %d active, %d slots",
-                                len(pending), len(self._active_ids), slots_available)
+                    logger.info("Worker: %d actionable, %d active",
+                                len(pending), len(self._active_ids))
 
                 for req in pending:
-                    if slots_available <= 0:
-                        break
                     rid = req["id"]
 
                     # Skip in-flight
@@ -146,8 +180,22 @@ class WorkerController:
                     if rid in self._retry_after and self._retry_after[rid] > now:
                         continue
 
+                    # Provider-aware gate: resolve the backend for THIS
+                    # request. A backend that is unavailable (e.g. Flow with
+                    # no Chrome extension connected) leaves its requests
+                    # PENDING while other providers keep working.
+                    pname = _request_provider_name(req)
+                    provider = registry.resolve(pname)
+                    if not provider.is_available():
+                        logger.debug("Request %s deferred: provider '%s' unavailable",
+                                     rid[:8], provider.name)
+                        continue
+                    caps = provider.capabilities
+                    if self._active_for_provider(provider.name) >= caps.max_concurrent:
+                        continue
+
                     self._active_ids.add(rid)
-                    slots_available -= 1
+                    self._active_provider[rid] = provider.name
                     asyncio.create_task(self._run_one(req))
 
                 # Prune stale deferred/retry entries for requests no longer pending
@@ -162,14 +210,20 @@ class WorkerController:
 
     async def _run_one(self, req: dict):
         rid = req["id"]
+        pname = _request_provider_name(req)
+        registry = _get_registry()
+        provider = registry.resolve(pname)
+        caps = provider.capabilities
+        limiter = self._limiter_for(provider.name, caps.max_concurrent, caps.cooldown_s)
         try:
-            await self._rate_limiter.acquire()
+            await limiter.acquire()
             try:
                 await _process_one(req, self._deferred, self._retry_after)
             finally:
-                self._rate_limiter.release()
+                limiter.release()
         finally:
             self._active_ids.discard(rid)
+            self._active_provider.pop(rid, None)
 
 
 async def _prerequisites_met(req: dict, orientation: str) -> bool:
@@ -295,6 +349,9 @@ async def _dispatch(req: dict, orientation: str) -> dict:
     ops = get_operations()
     req_type, rid = req["type"], req["id"]
     pid = req.get("project_id", "0")
+    # Per-request provider selection: persisted on the request row, falling
+    # back to DEFAULT_PROVIDER when unset (handled by the registry).
+    provider = req.get("provider")
 
     # Scene-based operations
     if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "EDIT_IMAGE",
@@ -305,15 +362,15 @@ async def _dispatch(req: dict, orientation: str) -> dict:
         scene["_project_id"] = pid
 
         if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE"):
-            return await ops.generate_scene_image(scene, orientation)
+            return await ops.generate_scene_image(scene, orientation, job_id=rid, provider=provider)
         if req_type == "EDIT_IMAGE":
-            return await ops.edit_scene_image(scene, orientation, source_media_id=req.get("source_media_id"))
+            return await ops.edit_scene_image(scene, orientation, source_media_id=req.get("source_media_id"), job_id=rid, provider=provider)
         if req_type in ("GENERATE_VIDEO", "REGENERATE_VIDEO"):
-            return await ops.generate_scene_video(scene, orientation, request_id=rid)
+            return await ops.generate_scene_video(scene, orientation, request_id=rid, provider=provider)
         if req_type == "GENERATE_VIDEO_REFS":
-            return await ops.generate_scene_video_refs(scene, orientation, request_id=rid)
+            return await ops.generate_scene_video_refs(scene, orientation, request_id=rid, provider=provider)
         if req_type == "UPSCALE_VIDEO":
-            return await ops.upscale_scene_video(scene, orientation, request_id=rid)
+            return await ops.upscale_scene_video(scene, orientation, request_id=rid, provider=provider)
 
     # Character operations
     if req_type in ("GENERATE_CHARACTER_IMAGE", "REGENERATE_CHARACTER_IMAGE", "EDIT_CHARACTER_IMAGE"):
@@ -325,21 +382,11 @@ async def _dispatch(req: dict, orientation: str) -> dict:
             await crud.update_character(char["id"], media_id=None, reference_image_url=None)
             char["media_id"] = None
             char["reference_image_url"] = None
-            return await ops.generate_reference_image(char, pid)
+            return await ops.generate_reference_image(char, pid, job_id=rid, provider=provider)
         if req_type == "EDIT_CHARACTER_IMAGE":
-            src = req.get("source_media_id") or char.get("media_id")
-            if not src:
-                return {"error": "No source image to edit — generate a reference image first"}
-            edit_prompt = char.get("image_prompt") or char.get("description", "")
-            project = await crud.get_project(pid) if pid != "0" else None
-            tier = project.get("user_paygate_tier", "PAYGATE_TIER_ONE") if project else "PAYGATE_TIER_ONE"
-            aspect = "IMAGE_ASPECT_RATIO_LANDSCAPE" if char.get("entity_type") in ("location",) else "IMAGE_ASPECT_RATIO_PORTRAIT"
-            return await ops._client.edit_image(
-                prompt=edit_prompt, source_media_id=src,
-                project_id=pid, aspect_ratio=aspect,
-                user_paygate_tier=tier,
-            )
-        return await ops.generate_reference_image(char, pid)
+            return await ops.edit_character_image(
+                char, pid, source_media_id=req.get("source_media_id"), job_id=rid, provider=provider)
+        return await ops.generate_reference_image(char, pid, job_id=rid, provider=provider)
 
     return {"error": f"Unknown request type: {req_type}"}
 

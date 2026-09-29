@@ -70,6 +70,7 @@ class SQLiteRepository(Repository):
             horizontal_url=row.get("horizontal_url"),
             thumbnail_url=row.get("thumbnail_url"),
             duration=row.get("duration"),
+            target_duration_s=row.get("target_duration_s"),
             resolution=row.get("resolution"),
             youtube_id=row.get("youtube_id"),
             privacy=row.get("privacy", "unlisted"),
@@ -302,6 +303,7 @@ class SQLiteRepository(Repository):
             horizontal_url=video.horizontal_url,
             thumbnail_url=video.thumbnail_url,
             duration=video.duration,
+            target_duration_s=video.target_duration_s,
             resolution=video.resolution,
             youtube_id=video.youtube_id,
             privacy=video.privacy,
@@ -316,6 +318,7 @@ class SQLiteRepository(Repository):
         description: Optional[str] = None,
         display_order: int = 0,
         orientation: Optional[str] = None,
+        target_duration_s: Optional[float] = None,
     ) -> Video:
         row = await crud.create_video(
             project_id=project_id,
@@ -323,6 +326,7 @@ class SQLiteRepository(Repository):
             description=description,
             display_order=display_order,
             orientation=orientation,
+            target_duration_s=target_duration_s,
         )
         return self._row_to_video(row)
 
