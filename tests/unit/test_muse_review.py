@@ -1,4 +1,4 @@
-"""Tests for Muse review: contact sheets -> hand scoring -> submit.
+"""Tests for agent self-review (`muse` provider): contact sheets -> hand scoring -> submit.
 
 pytest-asyncio runs in AUTO mode (see pytest.ini).
 """
@@ -126,7 +126,7 @@ async def test_review_sheets_then_submit_end_to_end(
     assert sheet["scene_id"] == scene["id"]
     assert Path(sheet["sheets"][0]).exists()
 
-    # Muse scores the sheets by hand and submits.
+    # The agent scores the sheets by hand and submits.
     r = reviews_client.post(
         f"/api/videos/{video['id']}/review-submit",
         json={"project_id": proj["id"], "mode": "light", "scores": [{
@@ -146,7 +146,7 @@ async def test_review_sheets_then_submit_end_to_end(
     assert sr["has_critical_errors"] is False
     assert sr["overall_score"] > 0
 
-    # review-regenerate with Muse scores enqueues a bounded regen.
+    # review-regenerate with hand scores enqueues a bounded regen.
     r = reviews_client.post(
         f"/api/videos/{video['id']}/review-regenerate",
         json={"project_id": proj["id"], "mode": "light",

@@ -221,7 +221,7 @@ Review runs outside the worker — no retry policy applies, the call just raises
 Providers, models and efforts come from `agent/providers.json`; see
 `/fk-change-provider`.
 
-No review CLI installed (e.g. the Muse runtime)? Use Muse review instead —
+No review CLI installed? Score the sheets yourself instead —
 `POST /api/videos/<VID>/review-sheets`, score the sheets by hand, then
 `POST .../review-submit`. See `/fk-review-video`. A `review` call that fails
 with "command not found" / non-zero exit before producing JSON almost always

@@ -85,7 +85,7 @@ async def review_and_regenerate_endpoint(vid: str, body: RegenerateAfterReviewRe
     per scene. The worker queue picks the new requests up; regeneration goes
     through the same provider path as the original generation.
 
-    When ``body.scores`` is provided (Muse-scored review), the
+    When ``body.scores`` is provided (agent-scored review), the
     CLI/SDK review is skipped and the VideoReview is computed from those
     scores instead.
     """
@@ -122,7 +122,7 @@ def _review_from_scores(
     vid: str, project_id: str, mode: str, orientation: str,
     scores: list[SceneScoreInput],
 ) -> VideoReview:
-    """Compute a VideoReview from Muse-submitted scores.
+    """Compute a VideoReview from agent-submitted scores.
 
     Same validation, severity rules, CRITICAL caps, and overall computation
     as every other reviewer backend.
@@ -255,12 +255,13 @@ async def _detect_orientation(video_id: str) -> str:
 
 @router.post("/{vid}/review-sheets", response_model=ReviewSheetsResponse)
 async def review_sheets_endpoint(vid: str, body: ReviewSheetsRequest):
-    """Build contact sheets for Muse review — no AI CLI needed.
+    """Build contact sheets for agent self-review — no AI CLI needed.
 
     Extracts frames and tiles them into contact sheets persisted under the
     project's ``review/sheets/`` dir, then returns the sheet paths plus the
-    rubric prompt the reviewer should answer. Muse reads the sheets, scores
-    each scene, and submits via ``POST .../review-submit``.
+    rubric prompt the reviewer should answer. The agent (Muse, Codex, or
+    agy) reads the sheets with its own vision, scores each scene, and
+    submits via ``POST .../review-submit``.
     """
     if body.mode not in ("light", "deep"):
         raise HTTPException(400, "mode must be 'light' or 'deep'")
@@ -306,7 +307,7 @@ async def review_sheets_endpoint(vid: str, body: ReviewSheetsRequest):
 
 @router.post("/{vid}/review-submit", response_model=VideoReview)
 async def review_submit_endpoint(vid: str, body: ReviewSubmitRequest):
-    """Submit Muse's per-scene scores; the server computes the review.
+    """Submit the agent\u2019s per-scene hand scores; the server computes the review.
 
     Accepts the same JSON shape a CLI reviewer returns (dimensions, errors,
     usable_segments) and applies identical validation, severity rules,

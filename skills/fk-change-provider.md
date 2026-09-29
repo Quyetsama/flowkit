@@ -4,8 +4,9 @@ View or change which reviewer (`muse`, `claude`, `agy`, `codex`) — and which m
 reasoning effort — runs each AI role. One role exists today: `video_review`,
 the vision analysis behind `/fk-review-video`.
 
-- `muse` = the assistant itself (Muse): no CLI, no model, no effort. The
-  review flow becomes contact sheets → hand scoring → submit (see
+- `muse` = the agent itself (Muse, Codex, or agy — whoever runs the
+  skills): no CLI, no model, no effort. The review flow becomes contact
+  sheets → hand scoring with your own vision → submit (see
   `/fk-review-video` step 3a). Official provider, opt-in per role.
 - `claude` / `agy` / `codex` = AI CLIs the server shells out to.
 

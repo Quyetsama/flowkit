@@ -5,10 +5,11 @@ Three CLIs back the vision work: Claude Code (`claude`), Google Antigravity
 flag names, effort ladders, whether an unknown model slug is an error — so the
 differences live here rather than being re-derived at each call site.
 
-A fourth reviewer, `muse`, is the assistant itself (Muse): no binary, no
+A fourth reviewer, `muse`, is the agent itself (Muse, Codex, or agy — whichever agent is running these skills): no binary, no
 model catalog, no effort ladder. It is an official provider option, not a
-default — a role pointed at `muse` means Muse scores contact sheets by
+default — a role pointed at `muse` means the agent scores contact sheets by
 hand via the review-sheets / review-submit endpoints (see `/fk-review-video`).
+The provider key is `muse` for historical reasons; it means "me, the agent".
 
 Config lives in `agent/providers.json`, hot-reloaded into `config.CLI_PROVIDERS`:
 
@@ -36,7 +37,7 @@ PROVIDER_BINARIES = {
     "claude": "claude",
     "agy": "agy",
     "codex": "codex",
-    # `muse` has no binary: the reviewer IS the assistant (Muse), reading
+    # `muse` has no binary: the reviewer IS the agent itself, reading
     # contact sheets through its own vision and scoring via review-submit.
     "muse": None,
 }
@@ -171,10 +172,10 @@ async def validate_role_entry(role: str, entry: dict) -> dict:
         raise ValueError(
             f"'{binary}' binary not found on PATH — install it first"
         )
-    # `muse` (the assistant itself) needs no binary and takes no model/effort.
+    # `muse` (the agent itself) needs no binary and takes no model/effort.
     if provider == "muse" and (entry.get("model") or entry.get("effort")):
         raise ValueError(
-            "The 'muse' reviewer is the assistant itself — it takes no model "
+            "The 'muse' reviewer is the agent itself — it takes no model "
             "or effort. Clear both fields."
         )
 

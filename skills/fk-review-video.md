@@ -43,9 +43,12 @@ For each scene, verify `${ori}_video_status = COMPLETED` (orientation auto-detec
 
 **ABORT** if any scene is missing a completed video — tell user to run `/fk-gen-videos` first.
 
-## Step 3a: Muse review (`--by muse`)
+## Step 3a: Self review (`--by muse`)
 
-Build the contact sheets — no AI CLI involved:
+You — the agent running this skill (Muse, Codex, or agy) — score the sheets
+by hand with your own vision. The provider key is `muse` for historical
+reasons; it means "me, the agent". Build the contact sheets — no AI CLI
+involved:
 
 ```bash
 curl -s -X POST "http://127.0.0.1:8100/api/videos/<VID>/review-sheets" \
@@ -80,7 +83,7 @@ curl -s -X POST "http://127.0.0.1:8100/api/videos/<VID>/review-submit" \
   ]}' | python3 -m json.tool
 ```
 
-To auto-regenerate bad scenes from Muse scores (bounded by
+To auto-regenerate bad scenes from your hand scores (bounded by
 `max_regenerations` per scene), pass the same `scores` array to
 `POST /api/videos/<VID>/review-regenerate`.
 

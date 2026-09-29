@@ -44,6 +44,15 @@ This fork is maintained around that reality:
 
 The goal is simple: **when Flow changes, fix the integration quickly and upstream the reusable parts.**
 
+## AI Agent Support
+
+| Agent | Skills | Video review provider |
+|-------|--------|----------------------|
+| **Muse** | Native — reads `skills/fk-*.md` directly, vision on files and contact sheets (`muse.read`) | `muse` (= the agent itself) — official opt-in self-review: no CLI, no model, no API key; score sheets by hand via `review-sheets` → `review-submit` |
+| **Claude Code** | Auto-loaded via `CLAUDE.md`, native `/fk-*` slash commands | `claude` — default `video_review` role |
+| **Codex CLI** | Reads `skills/fk-<name>.md` via `AGENTS.md`; vision on contact sheets for self-review | `codex` — OpenAI Codex CLI, or `muse` (= the agent itself) for hand scoring |
+| **agy** (Google Antigravity) | Reads skill files manually; vision on contact sheets for self-review | `agy` — Antigravity CLI, or `muse` (= the agent itself) for hand scoring |
+
 ## Current status
 
 **Last live validation: 2026-09-23.**
@@ -480,7 +489,8 @@ Muse is a first-class FlowKit agent, not just another skill reader:
   Muse reads `skills/fk-*.md` and calls its own tools directly, including
   vision on files (`muse.read` for contact sheets and images).
 - **`muse` is an official video-review provider** — no CLI, no model, no API
-  key. It scores review contact sheets by hand through
+  key. The key means "the agent itself": Muse, Codex, or agy scores review
+  contact sheets by hand with its own vision through
   `POST .../review-sheets` → vision → `POST .../review-submit`
   (see `/fk-review-video --by muse`). Opt in per role with
   `/fk-change-provider set muse`; the default role stays on `claude`.

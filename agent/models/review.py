@@ -57,7 +57,7 @@ class VideoReview(BaseModel):
 
 
 class SceneScoreInput(BaseModel):
-    """One scene's raw reviewer answer, as Muse scores it.
+    """One scene's raw reviewer answer, as the agent scores it by hand.
 
     Same JSON shape a CLI reviewer returns: dimensions, errors,
     usable_segments. The server applies the identical validation, severity
@@ -98,7 +98,7 @@ class SceneRegenDecision(BaseModel):
 
 
 class ReviewSheetsRequest(BaseModel):
-    """Build contact sheets for Muse review — no AI CLI involved."""
+    """Build contact sheets for agent self-review — no AI CLI involved."""
     project_id: str
     mode: str = "light"  # light (4fps) | deep (8fps)
     orientation: Optional[str] = None  # VERTICAL | HORIZONTAL (auto if omitted)
@@ -127,7 +127,7 @@ class ReviewSheetsResponse(BaseModel):
 
 
 class ReviewSubmitRequest(BaseModel):
-    """Submit Muse's scores; the server computes the review."""
+    """Submit the agent\u2019s hand scores; the server computes the review."""
     project_id: str
     mode: str = "light"
     orientation: Optional[str] = None

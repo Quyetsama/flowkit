@@ -665,14 +665,14 @@ async def _analyze_cli(
     `role` is passed in by a multi-scene review so every scene runs on the same
     backend — see `review_video`.
 
-    The `muse` reviewer (Muse, the assistant itself) has no CLI to shell out to:
+    The `muse` reviewer (the agent itself) has no CLI to shell out to:
     pointing the role at it and calling this endpoint is a configuration
     mistake, not a review — build sheets via `review-sheets` and submit scores
     via `review-submit` instead (see `/fk-review-video`).
     """
     if (role or {}).get("provider") == "muse":
         raise RuntimeError(
-            "video_review role is 'muse' (Muse, the assistant itself): the server "
+            "video_review role is 'muse' (the agent itself): the server "
             "cannot invoke it. Use POST /api/videos/<VID>/review-sheets to "
             "build contact sheets, score them by hand, then POST "
             "/api/videos/<VID>/review-submit."
@@ -869,10 +869,10 @@ async def prepare_review_sheets(
 ) -> dict:
     """Build contact sheets for a scene WITHOUT calling any reviewer.
 
-    Sheets are written under ``persist_dir`` (survives the call) so an
-    external reviewer — e.g. Muse scoring by hand — can read them later.
-    Returns sheet paths, frame metadata, and the rubric prompt the reviewer
-    should answer.
+    Sheets are written under ``persist_dir`` (survives the call) so the
+    agent itself — Muse, Codex, or agy — can read them later and score by
+    hand. Returns sheet paths, frame metadata, and the rubric prompt the
+    reviewer should answer.
 
     Raises ValueError when the scene has no fetchable video.
     """
@@ -909,9 +909,9 @@ def score_review_answer(
 ) -> SceneReview:
     """Turn a raw reviewer answer (dimensions/errors/usable_segments) into a SceneReview.
 
-    Shared by every reviewer backend — CLI, SDK, or Muse scoring contact
-    sheets by hand. Applies the same repairs, severity rules, CRITICAL caps,
-    and overall computation.
+    Shared by every reviewer backend — CLI, SDK, or the agent itself
+    scoring contact sheets by hand. Applies the same repairs, severity rules,
+    CRITICAL caps, and overall computation.
     """
     errors = []
     # Parse structured errors with severity.
