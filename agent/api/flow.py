@@ -32,76 +32,229 @@ from agent.services.omni_flash import (
     generate_omni_flash_video,
 )
 
-router = APIRouter(prefix="/flow", tags=["flow"])
+TAG_IMAGE = "🎨 Tạo & Xử Lý Ảnh (Image Generation)"
+TAG_VIDEO = "🎬 Tạo Video & Upscale (Video Generation)"
+TAG_STATUS = "💳 Trạng Thái & Credits (Status & Credits)"
+
+router = APIRouter(prefix="/flow")
 
 
 class GenerateImageRequest(BaseModel):
-    prompt: str
-    project_id: str = ""
-    aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT"
-    user_paygate_tier: str = "PAYGATE_TIER_ONE"
-    image_model: Optional[str] = None
-    count: int = Field(default=1, ge=1, le=4)
-    seed: Optional[int] = Field(default=None, ge=1, le=1_000_000_000)
-    # New generic name plus the old character-specific field for compatibility.
-    reference_media_ids: Optional[list[str]] = None
-    character_media_ids: Optional[list[str]] = None
+    prompt: str = Field(
+        ...,
+        description="Mô tả chi tiết hình ảnh cần tạo.",
+        examples=["Chân dung điện ảnh chiến binh cyberpunk giữa đường phố Tokyo đêm mưa, ánh đèn neon phản chiếu, chi tiết 8k"],
+    )
+    project_id: str = Field(
+        default="",
+        description="ID dự án Flow (để trống để tự động cấp phát session project).",
+    )
+    aspect_ratio: str = Field(
+        default="IMAGE_ASPECT_RATIO_PORTRAIT",
+        description="Tỉ lệ ảnh: IMAGE_ASPECT_RATIO_LANDSCAPE (16:9), IMAGE_ASPECT_RATIO_PORTRAIT (9:16), IMAGE_ASPECT_RATIO_SQUARE (1:1)",
+        examples=["IMAGE_ASPECT_RATIO_LANDSCAPE"],
+    )
+    user_paygate_tier: str = Field(
+        default="PAYGATE_TIER_ONE",
+        description="Gói dịch vụ: PAYGATE_TIER_ONE hoặc PAYGATE_TIER_TWO.",
+    )
+    image_model: Optional[str] = Field(
+        default=None,
+        description="Model tạo ảnh: None (mặc định Nano Banana Pro), hoặc chỉ định tên model.",
+    )
+    count: int = Field(
+        default=1,
+        ge=1,
+        le=4,
+        description="Số lượng ảnh tạo ra (1 đến 4 ảnh).",
+        examples=[1],
+    )
+    seed: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=1_000_000_000,
+        description="Seed ngẫu nhiên để cố định phong cách (tùy chọn).",
+    )
+    reference_media_ids: Optional[list[str]] = Field(
+        default=None,
+        description="Danh sách UUID các ảnh tham chiếu (nhân vật, phong cách).",
+        examples=[["00000000-0000-0000-0000-000000000000"]],
+    )
+    character_media_ids: Optional[list[str]] = Field(
+        default=None,
+        description="Alias cũ cho reference_media_ids.",
+    )
 
 
 class GenerateVideoRequest(BaseModel):
-    start_image_media_id: str
-    prompt: str
-    project_id: str = ""
-    scene_id: str
-    aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
-    end_image_media_id: Optional[str] = None
-    user_paygate_tier: str = "PAYGATE_TIER_ONE"
-    # Backward compatible: legacy requests remain Veo unless explicitly set.
-    model_family: Literal["veo", "omni_flash"] = "veo"
-    duration_s: int = 8
-    resolution: Literal["360p", "720p"] = "720p"
+    start_image_media_id: str = Field(
+        ...,
+        description="UUID ảnh khởi đầu (First Frame / Image-to-Video).",
+        examples=["00000000-0000-0000-0000-000000000000"],
+    )
+    prompt: str = Field(
+        ...,
+        description="Mô tả chuyển động và diễn biến cảnh từ ảnh khởi đầu.",
+        examples=["Nhân vật mỉm cười nhẹ nhàng và bước về phía máy quay, tuyết rơi chậm xung quanh."],
+    )
+    project_id: str = Field(
+        default="",
+        description="ID dự án Flow (để trống để tự động cấp phát).",
+    )
+    scene_id: str = Field(
+        default="",
+        description="ID phân cảnh (tùy chọn).",
+    )
+    aspect_ratio: str = Field(
+        default="VIDEO_ASPECT_RATIO_PORTRAIT",
+        description="Tỉ lệ video: VIDEO_ASPECT_RATIO_PORTRAIT (9:16) hoặc VIDEO_ASPECT_RATIO_LANDSCAPE (16:9).",
+        examples=["VIDEO_ASPECT_RATIO_PORTRAIT"],
+    )
+    end_image_media_id: Optional[str] = Field(
+        default=None,
+        description="UUID ảnh kết thúc (Last Frame - tùy chọn để tạo chuyển cảnh mượt mà giữa 2 frame).",
+    )
+    user_paygate_tier: str = Field(
+        default="PAYGATE_TIER_ONE",
+    )
+    model_family: Literal["veo", "omni_flash"] = Field(
+        default="omni_flash",
+        description="Mô hình video: omni_flash (khuyên dùng) hoặc veo.",
+        examples=["omni_flash"],
+    )
+    duration_s: int = Field(
+        default=8,
+        description="Thời lượng video: 4, 6, 8, hoặc 10 giây.",
+        examples=[8],
+    )
+    resolution: Literal["360p", "720p"] = Field(
+        default="720p",
+        description="Độ phân giải video ban đầu (720p hoặc 360p).",
+        examples=["720p"],
+    )
 
 
 class GenerateVideoRefsRequest(BaseModel):
-    reference_media_ids: list[str]
-    prompt: str
-    project_id: str = ""
-    scene_id: str
-    aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
-    user_paygate_tier: str = "PAYGATE_TIER_ONE"
-    # Backward compatible: existing callers keep the Veo R2V path unless they
-    # explicitly opt into Omni Flash.
-    model_family: Literal["veo", "omni_flash"] = "veo"
-    duration_s: int = 8
-    resolution: Literal["360p", "720p"] = "720p"
+    reference_media_ids: list[str] = Field(
+        ...,
+        description="Danh sách UUID các ảnh tham chiếu nhân vật/bối cảnh cần xuất hiện trong video.",
+        examples=[["00000000-0000-0000-0000-000000000000"]],
+    )
+    prompt: str = Field(
+        ...,
+        description="Mô tả hành động của nhân vật trong video.",
+        examples=["Nhân vật bước đi tự tin trong khu phố ánh sáng sầm uất."],
+    )
+    project_id: str = Field(
+        default="",
+    )
+    scene_id: str = Field(
+        default="",
+    )
+    aspect_ratio: str = Field(
+        default="VIDEO_ASPECT_RATIO_PORTRAIT",
+        description="Tỉ lệ video: VIDEO_ASPECT_RATIO_PORTRAIT (9:16) hoặc VIDEO_ASPECT_RATIO_LANDSCAPE (16:9).",
+        examples=["VIDEO_ASPECT_RATIO_LANDSCAPE"],
+    )
+    user_paygate_tier: str = Field(
+        default="PAYGATE_TIER_ONE",
+    )
+    model_family: Literal["veo", "omni_flash"] = Field(
+        default="omni_flash",
+        examples=["omni_flash"],
+    )
+    duration_s: int = Field(
+        default=8,
+        examples=[8],
+    )
+    resolution: Literal["360p", "720p"] = Field(
+        default="720p",
+        examples=["720p"],
+    )
 
 
 class GenerateOmniFlashVideoRequest(BaseModel):
-    reference_media_ids: list[str]
-    prompt: str
-    project_id: str = ""
-    scene_id: str = ""
-    duration_s: int = 8
-    resolution: Literal["360p", "720p"] = "720p"
-    aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
-    user_paygate_tier: str = "PAYGATE_TIER_ONE"
+    reference_media_ids: list[str] = Field(
+        ...,
+        description="Danh sách UUID các ảnh tham chiếu.",
+    )
+    prompt: str = Field(
+        ...,
+        description="Prompt mô tả video.",
+    )
+    project_id: str = Field(
+        default="",
+    )
+    scene_id: str = Field(
+        default="",
+    )
+    duration_s: int = Field(
+        default=8,
+        examples=[8],
+    )
+    resolution: Literal["360p", "720p"] = Field(
+        default="720p",
+        examples=["720p"],
+    )
+    aspect_ratio: str = Field(
+        default="VIDEO_ASPECT_RATIO_PORTRAIT",
+        examples=["VIDEO_ASPECT_RATIO_PORTRAIT"],
+    )
+    user_paygate_tier: str = Field(
+        default="PAYGATE_TIER_ONE",
+    )
 
 
 class GenerateOmniFlashTextVideoRequest(BaseModel):
-    prompt: str
-    project_id: str = ""
-    scene_id: str = ""
-    duration_s: int = 8
-    resolution: Literal["360p", "720p"] = "720p"
-    aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
-    user_paygate_tier: str = "PAYGATE_TIER_ONE"
+    prompt: str = Field(
+        ...,
+        description="Prompt kịch bản hành động cho video (khuyên dùng cấu trúc thời gian: 0-3s: [hành động]. 3-6s: [hành động]. 6-8s: [kết thúc]).",
+        examples=["0-3s: Siêu xe thể thao màu đỏ tăng tốc lao qua đại lộ ánh sáng ban đêm. 3-8s: Góc máy quay lia từ trên cao xuống toàn cảnh thành phố tương lai."],
+    )
+    project_id: str = Field(
+        default="",
+        description="ID dự án Flow (để trống để tự động cấp phát).",
+    )
+    scene_id: str = Field(
+        default="",
+    )
+    duration_s: int = Field(
+        default=8,
+        description="Thời lượng video (4, 6, 8, hoặc 10 giây).",
+        examples=[8],
+    )
+    resolution: Literal["360p", "720p"] = Field(
+        default="720p",
+        description="Độ phân giải: 720p hoặc 360p.",
+        examples=["720p"],
+    )
+    aspect_ratio: str = Field(
+        default="VIDEO_ASPECT_RATIO_PORTRAIT",
+        description="Tỉ lệ khung hình: VIDEO_ASPECT_RATIO_PORTRAIT (9:16) hoặc VIDEO_ASPECT_RATIO_LANDSCAPE (16:9).",
+        examples=["VIDEO_ASPECT_RATIO_LANDSCAPE"],
+    )
+    user_paygate_tier: str = Field(
+        default="PAYGATE_TIER_ONE",
+    )
 
 
 class UpscaleVideoRequest(BaseModel):
-    media_id: str
-    scene_id: str
-    aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
-    resolution: str = "VIDEO_RESOLUTION_4K"
+    media_id: str = Field(
+        ...,
+        description="UUID của video cần nâng cấp độ phân giải.",
+        examples=["00000000-0000-0000-0000-000000000000"],
+    )
+    scene_id: str = Field(
+        default="",
+    )
+    aspect_ratio: str = Field(
+        default="VIDEO_ASPECT_RATIO_PORTRAIT",
+    )
+    resolution: str = Field(
+        default="VIDEO_RESOLUTION_4K",
+        description="Độ phân giải mục tiêu: VIDEO_RESOLUTION_4K hoặc VIDEO_RESOLUTION_1080P.",
+        examples=["VIDEO_RESOLUTION_4K"],
+    )
     project_id: Optional[str] = None
 
 
@@ -191,7 +344,7 @@ async def _resolve_direct_project(client, project_id: str) -> str:
     return pid
 
 
-@router.get("/status")
+@router.get("/status", tags=[TAG_STATUS], summary="Kiểm tra trạng thái kết nối Extension & Chrome")
 async def extension_status():
     """Report transport state and the real signed-in Flow browser session."""
     client = get_flow_client()
@@ -220,7 +373,7 @@ async def extension_status():
     }
 
 
-@router.post("/clear-hijack")
+@router.post("/clear-hijack", tags=[TAG_STATUS], summary="Xóa cooldown hijack để tiếp tục tạo ngay")
 async def clear_hijack_cooldown():
     """Reset the generation cooldown triggered by extension_hijack_detected.
 
@@ -238,7 +391,7 @@ async def clear_hijack_cooldown():
     }
 
 
-@router.post("/ensure-session")
+@router.post("/ensure-session", tags=[TAG_STATUS], summary="Phục hồi phiên đăng nhập tài khoản Flow")
 async def ensure_session():
     """Reopen/reload Flow in the persistent Google profile and re-check login."""
     client = get_flow_client()
@@ -256,7 +409,7 @@ async def ensure_session():
     }
 
 
-@router.get("/account")
+@router.get("/account", tags=[TAG_STATUS], summary="Lấy thông tin tài khoản Google đang đăng nhập")
 async def get_account():
     """Return the signed-in Flow Google account name/email, never auth secrets."""
     client = get_flow_client()
@@ -265,7 +418,7 @@ async def get_account():
     return await inspect_google_account()
 
 
-@router.get("/credits")
+@router.get("/credits", tags=[TAG_STATUS], summary="Kiểm tra số dư credit Google Flow")
 async def get_credits(refresh: bool = False):
     """Get the real visible Google Flow credit balance."""
     client = get_flow_client()
@@ -277,13 +430,13 @@ async def get_credits(refresh: bool = False):
     return result.get("data", result)
 
 
-@router.get("/image-capabilities")
+@router.get("/image-capabilities", tags=[TAG_IMAGE], summary="Tra cứu danh sách model ảnh và tỉ lệ khung hình")
 async def get_image_capabilities(refresh: bool = False):
     """List current image models, aspect ratios, count and upscale targets."""
     return await image_capabilities(refresh=refresh)
 
 
-@router.post("/generate-image")
+@router.post("/generate-image", tags=[TAG_IMAGE], summary="Tạo ảnh mới với AI (Nano Banana 2 / Pro)")
 async def generate_image(body: GenerateImageRequest):
     """Generate 1-4 images with an explicit or dynamically discovered model."""
     client = get_flow_client()
@@ -300,7 +453,7 @@ async def generate_image(body: GenerateImageRequest):
     return result.get("data", result)
 
 
-@router.post("/generate-video")
+@router.post("/generate-video", tags=[TAG_VIDEO], summary="Tạo video từ ảnh (First frame / First+Last frames)")
 async def generate_video(body: GenerateVideoRequest):
     """Submit frame-conditioned video generation using Veo or Omni Flash.
 
@@ -366,7 +519,7 @@ async def generate_video(body: GenerateVideoRequest):
     return _attach_credit_estimate(data, credit_snapshot, cost)
 
 
-@router.post("/generate-video-refs")
+@router.post("/generate-video-refs", tags=[TAG_VIDEO], summary="Tạo video từ ảnh tham chiếu (Reference-to-Video)")
 async def generate_video_refs(body: GenerateVideoRefsRequest):
     """Submit reference-to-video generation using Veo or Gemini Omni Flash.
 
@@ -419,7 +572,7 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
     return _attach_credit_estimate(data, credit_snapshot, cost)
 
 
-@router.post("/generate-video-omni-text")
+@router.post("/generate-video-omni-text", tags=[TAG_VIDEO], summary="Tạo video từ văn bản (Omni Flash Text-to-Video 4s-10s)")
 async def generate_video_omni_text(body: GenerateOmniFlashTextVideoRequest):
     """Submit Omni 1.1 Flash text-to-video on flow.google.com.
 
@@ -453,7 +606,7 @@ async def generate_video_omni_text(body: GenerateOmniFlashTextVideoRequest):
     return _attach_credit_estimate(data, credit_snapshot, cost)
 
 
-@router.post("/generate-video-omni")
+@router.post("/generate-video-omni", tags=[TAG_VIDEO], summary="Tạo video Gemini Omni Flash")
 async def generate_video_omni(body: GenerateOmniFlashVideoRequest):
     """Submit Gemini Omni Flash reference-to-video generation.
 
@@ -483,7 +636,7 @@ async def generate_video_omni(body: GenerateOmniFlashVideoRequest):
     return _attach_credit_estimate(data, credit_snapshot, cost)
 
 
-@router.post("/upscale-video")
+@router.post("/upscale-video", tags=[TAG_VIDEO], summary="Nâng cấp độ phân giải video (1080p / 4K)")
 async def upscale_video(body: UpscaleVideoRequest):
     """Submit video upscale (returns operations for polling)."""
     client = get_flow_client()
@@ -495,7 +648,7 @@ async def upscale_video(body: UpscaleVideoRequest):
     return result.get("data", result)
 
 
-@router.post("/check-status")
+@router.post("/check-status", tags=[TAG_VIDEO], summary="Kiểm tra trạng thái render video/ảnh (Polling)")
 async def check_status(body: CheckStatusRequest):
     """Check Veo operation status or Omni workflow/media status.
 
@@ -529,7 +682,7 @@ async def check_status(body: CheckStatusRequest):
     return result.get("data", result)
 
 
-@router.post("/check-omni-status")
+@router.post("/check-omni-status", tags=[TAG_VIDEO], summary="Kiểm tra trạng thái job Omni Flash")
 async def check_omni_status(body: CheckOmniStatusRequest):
     """Poll Gemini Omni Flash jobs via workflow primary media IDs."""
     client = get_flow_client()
@@ -547,7 +700,7 @@ async def check_omni_status(body: CheckOmniStatusRequest):
         raise HTTPException(502, str(exc)) from exc
 
 
-@router.post("/refresh-urls/{project_id}")
+@router.post("/refresh-urls/{project_id}", tags=[TAG_IMAGE, TAG_VIDEO], summary="Làm mới URL tải toàn bộ media trong project")
 async def refresh_project_urls(project_id: str):
     """Bulk refresh all media URLs for a project via per-media get_media calls."""
     client = get_flow_client()
@@ -559,7 +712,7 @@ async def refresh_project_urls(project_id: str):
     return result
 
 
-@router.get("/media/{media_id}")
+@router.get("/media/{media_id}", tags=[TAG_IMAGE, TAG_VIDEO], summary="Lấy metadata và URL tải media theo UUID")
 async def get_media(media_id: str):
     """Get media metadata + fresh signed URL from Google Flow.
 
@@ -583,7 +736,7 @@ async def get_media(media_id: str):
     return data
 
 
-@router.post("/edit-image")
+@router.post("/edit-image", tags=[TAG_IMAGE], summary="Chỉnh sửa ảnh có sẵn (Inpainting / Edits)")
 async def edit_image(body: EditImageRequest):
     """Edit an existing image using the current Flow BASE_IMAGE wire input."""
     client = get_flow_client()
@@ -605,7 +758,7 @@ async def edit_image(body: EditImageRequest):
     return result.get("data", result)
 
 
-@router.post("/export-image")
+@router.post("/export-image", tags=[TAG_IMAGE], summary="Xuất và tải ảnh chất lượng cao 2K / 4K")
 @router.post("/upscale-image", include_in_schema=False)
 async def export_image(body: UpscaleImageRequest):
     """Download a generated Flow image at 2K (or plan-gated 4K)."""
@@ -715,7 +868,8 @@ def _read_server_local_image(file_path: str) -> bytes:
 
 @router.post(
     "/upload-image",
-    summary="Upload image bytes or a server-local image",
+    tags=[TAG_IMAGE],
+    summary="Upload ảnh qua Base64 hoặc server-local path",
     description=(
         "JSON upload endpoint. External/API callers should send image_base64. "
         "file_path is a server-local convenience mode only: the path is opened by "
@@ -758,7 +912,8 @@ async def upload_image(body: UploadImageRequest):
 
 @router.post(
     "/upload-image-file",
-    summary="Upload an image file with multipart/form-data",
+    tags=[TAG_IMAGE],
+    summary="Upload file ảnh trực tiếp (multipart/form-data)",
     description=(
         "Recommended direct-file endpoint for external callers. The uploaded bytes are "
         "read from the HTTP request, so the caller does not need to share a filesystem "

@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 import websockets
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -116,7 +117,35 @@ async def lifespan(app: FastAPI):
     logger.info("Flow Kit stopped")
 
 
-app = FastAPI(title="Flow Kit", version="1.1.0", lifespan=lifespan)
+OPENAPI_TAGS = [
+    {
+        "name": "🎨 Tạo & Xử Lý Ảnh (Image Generation)",
+        "description": "Tạo ảnh mới với Nano Banana 2 / Pro, chỉnh sửa ảnh (Inpainting), upload file và lấy danh sách cấu hình hỗ trợ.",
+    },
+    {
+        "name": "🎬 Tạo Video & Upscale (Video Generation)",
+        "description": "Tạo video AI từ văn bản (Omni Flash Text-to-Video), từ ảnh khởi đầu (Image-to-Video), First+Last frames, reference ảnh, kiểm tra trạng thái render và nâng cấp 4K.",
+    },
+    {
+        "name": "⚡ Hàng Đợi Tạo Hàng Loạt (Batch Queue)",
+        "description": "Gửi nhiều prompt tạo ảnh/video cùng lúc vào hàng đợi tự động phân bổ và xử lý nền.",
+    },
+    {
+        "name": "💳 Trạng Thái & Credits (Status & Credits)",
+        "description": "Kiểm tra số dư credit Google Flow, tình trạng kết nối Extension/Chrome CDP và điều khiển cơ chế cooldown bảo vệ tài khoản.",
+    },
+]
+
+app = FastAPI(
+    title="FlowKit — Google Flow Automation & REST API",
+    description=(
+        "Hệ thống API tự động hóa Google Flow (Nano Banana, Gemini Omni Flash, Veo 2).\n\n"
+        "👉 **Trang Swagger chuyên biệt cho Tạo Ảnh & Video: [/swagger](/swagger)**"
+    ),
+    version="1.2.1",
+    openapi_tags=OPENAPI_TAGS,
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -210,6 +239,80 @@ async def health():
 @app.get("/studio")
 async def studio_redirect():
     return RedirectResponse("/api/studio/ui")
+
+
+# ─── Swagger Generation UI ───────────────────────────────────
+
+@app.get("/openapi-generation.json", include_in_schema=False)
+async def openapi_generation_schema():
+    """Return a focused OpenAPI schema containing only Image and Video Generation APIs."""
+    full_schema = app.openapi()
+
+    generation_prefixes = (
+        "/api/flow/generate-",
+        "/api/flow/edit-image",
+        "/api/flow/upload-image",
+        "/api/flow/export-",
+        "/api/flow/image-capabilities",
+        "/api/flow/media/",
+        "/api/flow/check-",
+        "/api/flow/upscale-video",
+        "/api/flow/refresh-urls/",
+        "/api/flow/credits",
+        "/api/flow/status",
+        "/api/flow/clear-hijack",
+        "/api/requests/batch",
+        "/health",
+    )
+
+    filtered_paths = {}
+    used_tags = set()
+    for path, methods in full_schema.get("paths", {}).items():
+        if any(path.startswith(p) for p in generation_prefixes):
+            filtered_paths[path] = methods
+            for op in methods.values():
+                if isinstance(op, dict) and "tags" in op:
+                    used_tags.update(op["tags"])
+
+    filtered_tags = [
+        t for t in full_schema.get("tags", [])
+        if t.get("name") in used_tags
+    ]
+
+    return {
+        "openapi": full_schema.get("openapi", "3.1.0"),
+        "info": {
+            "title": "FlowKit — Swagger API Tạo Ảnh & Video (Google Flow)",
+            "description": (
+                "## 🎨 & 🎬 FlowKit Generation API Documentation\n\n"
+                "Giao diện Swagger tương tác trực tiếp để kiểm thử và tích hợp các API tạo hình ảnh và video AI của **Google Flow** (Nano Banana, Gemini Omni Flash, Veo 2).\n\n"
+                "### 💡 Hướng dẫn nhanh:\n"
+                "- **1. Tạo ảnh (Nano Banana)**: Dùng `POST /api/flow/generate-image`.\n"
+                "- **2. Tạo video từ chữ (Omni Flash Text-to-Video)**: Dùng `POST /api/flow/generate-video-omni-text` (chọn duration 4/6/8/10s).\n"
+                "- **3. Tạo video từ ảnh (First frame / Image-to-Video)**: Upload ảnh qua `POST /api/flow/upload-image-file` lấy `media_id`, sau đó gọi `POST /api/flow/generate-video`.\n"
+                "- **4. Polling trạng thái render video**: Dùng `POST /api/flow/check-status` với workflow object trả về.\n"
+                "- **5. Tạo hàng loạt**: Dùng `POST /api/requests/batch` và kiểm tra qua `GET /api/requests/batch-status`.\n"
+                "- **6. Kiểm tra Credit**: Xem số dư tại `GET /api/flow/credits`.\n"
+            ),
+            "version": "1.2.1",
+        },
+        "tags": filtered_tags or OPENAPI_TAGS,
+        "paths": filtered_paths,
+        "components": full_schema.get("components", {}),
+    }
+
+
+@app.get("/swagger", include_in_schema=False)
+@app.get("/docs/generation", include_in_schema=False)
+async def swagger_generation_ui():
+    """Trang Swagger UI chuyên biệt dành riêng cho API Tạo Ảnh & Video."""
+    return get_swagger_ui_html(
+        openapi_url="/openapi-generation.json",
+        title="FlowKit — API Tạo Ảnh & Video (Swagger UI)",
+        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
+        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
+        swagger_favicon_url="https://fastapi.tiangolo.com/img/favicon.png",
+    )
 
 
 # ─── Dashboard WebSocket ──────────────────────────────────────

@@ -60,7 +60,10 @@ async def create(body: RequestCreate):
     return await crud.create_request(**data)
 
 
-@router.post("/batch", response_model=list[Request])
+TAG_BATCH = "⚡ Hàng Đợi Tạo Hàng Loạt (Batch Queue)"
+
+
+@router.post("/batch", response_model=list[Request], tags=[TAG_BATCH], summary="Gửi danh sách batch tạo ảnh/video vào hàng đợi")
 async def create_batch(body: BatchRequestCreate):
     """Submit multiple requests atomically. Server handles throttling (max 5 concurrent, 10s cooldown).
     Duplicate active requests for the same scene+type are skipped (not errors)."""
@@ -113,7 +116,7 @@ async def list_pending():
     return await crud.list_pending_requests()
 
 
-@router.get("/batch-status", response_model=BatchStatus)
+@router.get("/batch-status", response_model=BatchStatus, tags=[TAG_BATCH], summary="Kiểm tra tiến độ hoàn thành của batch")
 async def batch_status(video_id: str = None, project_id: str = None,
                        type: str = None, orientation: str = None):
     """Aggregate status for all requests matching the filter.
