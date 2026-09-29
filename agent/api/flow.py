@@ -1,12 +1,22 @@
 """Direct Flow API endpoints — for manual operations outside the queue."""
+import asyncio
 import base64
+import logging
 import mimetypes
+import os
+from pathlib import Path
+import time
+from typing import Literal, Optional
+from urllib.parse import quote
+import uuid
 
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from typing import Literal, Optional
 
 from agent.config import (
+    BASE_DIR,
+    OUTPUT_DIR,
     USE_BATCH_RPC, FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED,
     FLOW_GENERATION_MIN_INTERVAL_S, FLOW_GENERATION_MAX_CONCURRENT,
     FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
@@ -31,10 +41,24 @@ from agent.services.omni_flash import (
     generate_omni_flash_text_video,
     generate_omni_flash_video,
 )
+from agent.services.watermark_remover import (
+    download_media_file,
+    run_delogo,
+    poll_media_download_url,
+    get_media_dimensions,
+)
+
+logger = logging.getLogger(__name__)
 
 TAG_IMAGE = "🎨 Tạo & Xử Lý Ảnh (Image Generation)"
 TAG_VIDEO = "🎬 Tạo Video & Upscale (Video Generation)"
+TAG_WATERMARK = "💧 Xóa Watermark (Watermark Removal)"
 TAG_STATUS = "💳 Trạng Thái & Credits (Status & Credits)"
+
+FLOW_OUTPUT_DIR = OUTPUT_DIR / "flow"
+FLOW_IMAGES_DIR = FLOW_OUTPUT_DIR / "images"
+FLOW_VIDEOS_DIR = FLOW_OUTPUT_DIR / "videos"
+FLOW_UPLOADS_DIR = FLOW_OUTPUT_DIR / "uploads"
 
 router = APIRouter(prefix="/flow")
 
@@ -83,6 +107,83 @@ class GenerateImageRequest(BaseModel):
     character_media_ids: Optional[list[str]] = Field(
         default=None,
         description="Alias cũ cho reference_media_ids.",
+    )
+    auto_delogo: bool = Field(
+        default=True,
+        description="Tự động tải ảnh về và xóa watermark Google bằng thuật toán Lossless Reverse Alpha Blending.",
+        examples=[True],
+    )
+
+
+class GeneratedImageItem(BaseModel):
+    model_config = {"extra": "allow"}
+
+    name: str = Field(
+        ...,
+        description="UUID định danh ảnh (Media ID).",
+        examples=["0bb78ef5-0959-45e0-8270-b75fcf9f2bf8"],
+    )
+    image: Optional[dict] = Field(
+        default=None,
+        description="Dữ liệu ảnh từ Google Flow (chứa fifeUrl ảnh gốc).",
+    )
+    clean_url: Optional[str] = Field(
+        default=None,
+        description="Đường dẫn xem trực tiếp hoặc tải ảnh sạch đã xóa 100% watermark Google.",
+        examples=["/api/flow/file?path=output%2Fflow%2Fimages%2F0bb78ef5-0959-45e0-8270-b75fcf9f2bf8_clean.jpg"],
+    )
+    clean_file_path: Optional[str] = Field(
+        default=None,
+        description="Đường dẫn file ảnh sạch trên máy chủ.",
+        examples=["/Users/quyetnguyen/Documents/Me/Flowkit/output/flow/images/0bb78ef5-0959-45e0-8270-b75fcf9f2bf8_clean.jpg"],
+    )
+    original_file_path: Optional[str] = Field(
+        default=None,
+        description="Đường dẫn file ảnh gốc tải về từ Google Flow.",
+    )
+    watermark_removed: Optional[bool] = Field(
+        default=False,
+        description="Trạng thái xác nhận đã xóa watermark thành công.",
+        examples=[True],
+    )
+
+
+class GenerateImageResponse(BaseModel):
+    model_config = {"extra": "allow"}
+
+    media: list[GeneratedImageItem] = Field(
+        default_factory=list,
+        description="Danh sách các biến thể ảnh được tạo ra.",
+    )
+    clean_url: Optional[str] = Field(
+        default=None,
+        description="Đường dẫn truy cập ảnh sạch của biến thể đầu tiên để dùng ngay.",
+        examples=["/api/flow/file?path=output%2Fflow%2Fimages%2F0bb78ef5-0959-45e0-8270-b75fcf9f2bf8_clean.jpg"],
+    )
+    clean_file_path: Optional[str] = Field(
+        default=None,
+        description="Đường dẫn file ảnh sạch đầu tiên trên máy chủ.",
+        examples=["/Users/quyetnguyen/Documents/Me/Flowkit/output/flow/images/0bb78ef5-0959-45e0-8270-b75fcf9f2bf8_clean.jpg"],
+    )
+    watermark_removed: Optional[bool] = Field(
+        default=False,
+        description="Xác nhận ảnh đã được xóa watermark thành công.",
+        examples=[True],
+    )
+    requested_count: Optional[int] = Field(
+        default=1,
+        description="Số lượng ảnh yêu cầu tạo.",
+        examples=[1],
+    )
+    generated_count: Optional[int] = Field(
+        default=1,
+        description="Số lượng ảnh thực tế đã tạo thành công.",
+        examples=[1],
+    )
+    complete: Optional[bool] = Field(
+        default=True,
+        description="Cờ báo toàn bộ số lượng ảnh yêu cầu đã hoàn tất.",
+        examples=[True],
     )
 
 
@@ -256,6 +357,170 @@ class UpscaleVideoRequest(BaseModel):
         examples=["VIDEO_RESOLUTION_4K"],
     )
     project_id: Optional[str] = None
+
+
+class GenerateVideoFullRequest(BaseModel):
+    prompt: str = Field(
+        ...,
+        description="Mô tả chi tiết nội dung và chuyển động của video (khuyên dùng cấu trúc thời gian: 0-3s: [hành động], 3-6s: [hành động]).",
+        examples=["0-3s: Chiến binh bước đi giữa thành phố cyberpunk mưa rơi neon. 3-8s: Máy quay xoay quanh nhân vật rồi lia lên bầu trời tương lai."],
+    )
+    start_image_media_id: Optional[str] = Field(
+        default=None,
+        description="UUID ảnh khởi đầu (First frame / Image-to-Video). Để trống để tạo trực tiếp từ chữ (Text-to-Video).",
+        examples=["00000000-0000-0000-0000-000000000000"],
+    )
+    end_image_media_id: Optional[str] = Field(
+        default=None,
+        description="UUID ảnh kết thúc (Last frame - tùy chọn để morph chuyển cảnh giữa 2 ảnh).",
+    )
+    reference_media_ids: Optional[list[str]] = Field(
+        default=None,
+        description="Danh sách UUID các ảnh tham chiếu nhân vật/bối cảnh (Reference-to-Video).",
+    )
+    project_id: str = Field(
+        default="",
+        description="ID dự án Flow (để trống để tự động cấp phát session project).",
+    )
+    scene_id: str = Field(
+        default="",
+        description="ID phân cảnh (tùy chọn).",
+    )
+    aspect_ratio: str = Field(
+        default="VIDEO_ASPECT_RATIO_PORTRAIT",
+        description="Tỉ lệ video: VIDEO_ASPECT_RATIO_PORTRAIT (9:16) hoặc VIDEO_ASPECT_RATIO_LANDSCAPE (16:9).",
+        examples=["VIDEO_ASPECT_RATIO_PORTRAIT"],
+    )
+    duration_s: int = Field(
+        default=8,
+        description="Thời lượng video (4, 6, 8, hoặc 10 giây).",
+        examples=[8],
+    )
+    resolution: Literal["360p", "720p"] = Field(
+        default="720p",
+        description="Độ phân giải video ban đầu (720p hoặc 360p).",
+        examples=["720p"],
+    )
+    model_family: Literal["omni_flash", "veo"] = Field(
+        default="omni_flash",
+        description="Mô hình video: omni_flash (khuyên dùng, nhanh và đẹp) hoặc veo.",
+        examples=["omni_flash"],
+    )
+    user_paygate_tier: str = Field(
+        default="PAYGATE_TIER_ONE",
+    )
+    auto_delogo: bool = Field(
+        default=True,
+        description="Tự động tải video về và xóa watermark Google bằng thuật toán Lossless Reverse Alpha Blending.",
+        examples=[True],
+    )
+    timeout_seconds: int = Field(
+        default=480,
+        ge=30,
+        le=1200,
+        description="Thời gian tối đa chờ render hoàn tất (giây).",
+        examples=[480],
+    )
+
+
+class GenerateVideoFullResponse(BaseModel):
+    model_config = {"extra": "allow"}
+
+    status: str = Field(
+        description="Trạng thái hoàn thành: COMPLETED hoặc FAILED.",
+        examples=["COMPLETED"],
+    )
+    media_id: Optional[str] = Field(
+        default=None,
+        description="UUID video được tạo bởi Google Flow.",
+        examples=["9592f75a-38c6-47b7-872e-c534440c4ec3"],
+    )
+    clean_url: str = Field(
+        description="URL xem trực tiếp hoặc tải video sạch đã xóa sạch 100% watermark.",
+        examples=["/api/flow/file?path=output%2Fflow%2Fvideos%2F9592f75a-38c6-47b7-872e-c534440c4ec3_clean.mp4"],
+    )
+    clean_file_path: str = Field(
+        description="Đường dẫn file video sạch lưu trên ổ đĩa máy chủ.",
+        examples=["/Users/quyetnguyen/Documents/Me/Flowkit/output/flow/videos/9592f75a-38c6-47b7-872e-c534440c4ec3_clean.mp4"],
+    )
+    original_url: Optional[str] = Field(
+        default=None,
+        description="URL video gốc trực tiếp từ CDN của Google Flow.",
+        examples=["https://flow-content.google/..."],
+    )
+    original_file_path: str = Field(
+        description="Đường dẫn file video gốc đã tải về máy chủ.",
+        examples=["/Users/quyetnguyen/Documents/Me/Flowkit/output/flow/videos/9592f75a-38c6-47b7-872e-c534440c4ec3.mp4"],
+    )
+    watermark_removed: bool = Field(
+        description="Trạng thái xác nhận đã xóa watermark bằng Reverse Alpha Blending.",
+        examples=[True],
+    )
+    elapsed_seconds: float = Field(
+        description="Tổng thời gian thực thi toàn bộ pipeline từ lúc gửi prompt tới khi có video sạch (giây).",
+        examples=[68.2],
+    )
+    duration_s: int = Field(
+        description="Thời lượng video (giây).",
+        examples=[8],
+    )
+    aspect_ratio: str = Field(
+        description="Tỉ lệ khung hình của video.",
+        examples=["VIDEO_ASPECT_RATIO_PORTRAIT"],
+    )
+    resolution: str = Field(
+        description="Độ phân giải video.",
+        examples=["720p"],
+    )
+
+
+class RemoveWatermarkRequest(BaseModel):
+    file_path: Optional[str] = Field(
+        default=None,
+        description="Đường dẫn file media trên server (ảnh hoặc video).",
+        examples=["output/flow/videos/sample.mp4"],
+    )
+    url: Optional[str] = Field(
+        default=None,
+        description="URL tải media (Google Flow FifeUrl hoặc direct URL) để server tự động tải về và xóa watermark.",
+    )
+    media_id: Optional[str] = Field(
+        default=None,
+        description="UUID media trên Google Flow để tự động lấy link tải và xóa watermark.",
+    )
+    is_video: Optional[bool] = Field(
+        default=None,
+        description="Chỉ định rõ media là video (True) hay ảnh (False). Để trống để tự nhận diện theo phần mở rộng.",
+    )
+
+
+class RemoveWatermarkResponse(BaseModel):
+    model_config = {"extra": "allow"}
+
+    status: str = Field(
+        description="Trạng thái hoàn thành: COMPLETED hoặc FAILED.",
+        examples=["COMPLETED"],
+    )
+    clean_url: str = Field(
+        description="URL xem trực tiếp hoặc tải file media sạch sau khi xóa watermark.",
+        examples=["/api/flow/file?path=output%2Fflow%2Fvideos%2Fsample_clean.mp4"],
+    )
+    clean_file_path: str = Field(
+        description="Đường dẫn file sạch lưu trên ổ đĩa máy chủ.",
+        examples=["/Users/quyetnguyen/Documents/Me/Flowkit/output/flow/videos/sample_clean.mp4"],
+    )
+    original_file_path: str = Field(
+        description="Đường dẫn file gốc trước khi xử lý xóa watermark.",
+        examples=["/Users/quyetnguyen/Documents/Me/Flowkit/output/flow/videos/sample.mp4"],
+    )
+    watermark_removed: bool = Field(
+        description="Xác nhận đã xóa watermark thành công.",
+        examples=[True],
+    )
+    is_video: bool = Field(
+        description="Loại media: true nếu là video, false nếu là ảnh.",
+        examples=[True],
+    )
 
 
 class UploadImageRequest(BaseModel):
@@ -436,21 +701,66 @@ async def get_image_capabilities(refresh: bool = False):
     return await image_capabilities(refresh=refresh)
 
 
-@router.post("/generate-image", tags=[TAG_IMAGE], summary="Tạo ảnh mới với AI (Nano Banana 2 / Pro)")
+@router.post(
+    "/generate-image",
+    response_model=GenerateImageResponse,
+    tags=[TAG_IMAGE],
+    summary="Tạo ảnh mới với AI (Nano Banana 2 / Pro)",
+)
 async def generate_image(body: GenerateImageRequest):
-    """Generate 1-4 images with an explicit or dynamically discovered model."""
+    """Generate 1-4 images with an explicit or dynamically discovered model.
+
+    When auto_delogo=True (default), downloads the generated image(s) and
+    removes the Google watermark using Lossless Reverse Alpha Blending.
+    """
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
     project_id = await _resolve_direct_project(client, body.project_id)
-    data = body.model_dump(exclude={"reference_media_ids"})
+    data = body.model_dump(exclude={"reference_media_ids", "auto_delogo"})
     data["project_id"] = project_id
     refs = list(dict.fromkeys((body.reference_media_ids or []) + (body.character_media_ids or [])))
     data["character_media_ids"] = refs or None
     result = await client.generate_images(**data)
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
-    return result.get("data", result)
+    res_data = result.get("data", result)
+
+    if body.auto_delogo and isinstance(res_data, dict):
+        media_list = res_data.get("media") or []
+        FLOW_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        for item in media_list:
+            if not isinstance(item, dict):
+                continue
+            media_id = item.get("name")
+            gen_img = item.get("image", {}).get("generatedImage") if isinstance(item.get("image"), dict) else {}
+            download_url = gen_img.get("fifeUrl") or item.get("fifeUrl") or item.get("url")
+            if not download_url and media_id:
+                download_url = await poll_media_download_url(client, media_id, max_wait_seconds=15, poll_interval=2.0)
+
+            if download_url and media_id:
+                orig_file = FLOW_IMAGES_DIR / f"{media_id}.jpg"
+                clean_file = FLOW_IMAGES_DIR / f"{media_id}_clean.jpg"
+                try:
+                    await asyncio.to_thread(download_media_file, download_url, str(orig_file))
+                    cleaned = await asyncio.to_thread(run_delogo, str(orig_file), str(clean_file), False)
+                    target_file = clean_file if cleaned else orig_file
+                    item["clean_file_path"] = str(target_file)
+                    item["clean_url"] = f"/api/flow/file?path={quote(str(target_file))}"
+                    item["watermark_removed"] = bool(cleaned)
+                    item["original_file_path"] = str(orig_file)
+                except Exception as exc:
+                    logger.warning("Auto delogo failed for image %s: %s", media_id, exc)
+                    item["watermark_removed"] = False
+
+        if media_list and isinstance(media_list[0], dict):
+            first = media_list[0]
+            if "clean_url" in first:
+                res_data["clean_url"] = first["clean_url"]
+                res_data["clean_file_path"] = first.get("clean_file_path")
+                res_data["watermark_removed"] = first.get("watermark_removed", False)
+
+    return res_data
 
 
 @router.post("/generate-video", tags=[TAG_VIDEO], summary="Tạo video từ ảnh (First frame / First+Last frames)")
@@ -958,3 +1268,373 @@ async def upload_image_file(
         mime_type=resolved_mime,
         file_name=resolved_name,
     )
+
+
+@router.post(
+    "/generate-video-full",
+    response_model=GenerateVideoFullResponse,
+    tags=[TAG_VIDEO],
+    summary="Tạo Video hoàn chỉnh & Tự động xóa Watermark (Full Pipeline: Generate -> Poll -> Delogo -> Clean Video)",
+    description=(
+        "Chạy toàn bộ quy trình tạo video từ A-Z trong một lần gọi API:\n"
+        "1. Gửi lệnh tạo video lên Google Flow (Text-to-Video, Image-to-Video hoặc Reference-to-Video).\n"
+        "2. Tự động thăm dò (polling) đến khi Google Flow hoàn tất render video (hỗ trợ cả Omni Flash và Veo).\n"
+        "3. Tải file video chất lượng cao về server cục bộ.\n"
+        "4. Tự động áp dụng thuật toán Lossless Reverse Alpha Blending để bóc tách và xóa sạch Watermark Google ở góc phải từng frame video.\n"
+        "5. Trả về link video sạch (`clean_url`), đường dẫn lưu trữ cục bộ (`clean_file_path`), và trạng thái hoàn thành."
+    ),
+)
+async def generate_video_full(body: GenerateVideoFullRequest):
+    """Full-pipeline video generation: Submit -> Poll -> Download -> Delogo -> Return clean media."""
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+
+    project_id = await _resolve_direct_project(client, body.project_id)
+    start_time = time.time()
+
+    # 1. Submit request based on input parameters
+    submit_res = None
+    if body.start_image_media_id:
+        if body.model_family == "omni_flash":
+            if body.end_image_media_id:
+                submit_res = await generate_omni_flash_first_last_video(
+                    start_image_media_id=body.start_image_media_id,
+                    end_image_media_id=body.end_image_media_id,
+                    prompt=body.prompt,
+                    project_id=project_id,
+                    scene_id=body.scene_id,
+                    duration_s=body.duration_s,
+                    resolution=body.resolution,
+                    aspect_ratio=body.aspect_ratio,
+                    user_paygate_tier=body.user_paygate_tier,
+                )
+            else:
+                submit_res = await generate_omni_flash_first_frame_video(
+                    start_image_media_id=body.start_image_media_id,
+                    prompt=body.prompt,
+                    project_id=project_id,
+                    scene_id=body.scene_id,
+                    duration_s=body.duration_s,
+                    resolution=body.resolution,
+                    aspect_ratio=body.aspect_ratio,
+                    user_paygate_tier=body.user_paygate_tier,
+                )
+        else:
+            payload = {
+                "start_image_media_id": body.start_image_media_id,
+                "end_image_media_id": body.end_image_media_id,
+                "prompt": body.prompt,
+                "project_id": project_id,
+                "scene_id": body.scene_id,
+                "aspect_ratio": body.aspect_ratio,
+                "user_paygate_tier": body.user_paygate_tier,
+            }
+            submit_res = await client.generate_video(**{k: v for k, v in payload.items() if v is not None})
+    elif body.reference_media_ids:
+        if body.model_family == "omni_flash":
+            submit_res = await generate_omni_flash_video(
+                reference_media_ids=body.reference_media_ids,
+                prompt=body.prompt,
+                project_id=project_id,
+                scene_id=body.scene_id,
+                duration_s=body.duration_s,
+                resolution=body.resolution,
+                aspect_ratio=body.aspect_ratio,
+                user_paygate_tier=body.user_paygate_tier,
+            )
+        else:
+            submit_res = await client.generate_video_from_references(
+                reference_media_ids=body.reference_media_ids,
+                prompt=body.prompt,
+                project_id=project_id,
+                scene_id=body.scene_id,
+                aspect_ratio=body.aspect_ratio,
+                user_paygate_tier=body.user_paygate_tier,
+            )
+    else:
+        # Default Text-to-Video via Omni Flash
+        submit_res = await generate_omni_flash_text_video(
+            prompt=body.prompt,
+            project_id=project_id,
+            scene_id=body.scene_id,
+            duration_s=body.duration_s,
+            resolution=body.resolution,
+            aspect_ratio=body.aspect_ratio,
+            user_paygate_tier=body.user_paygate_tier,
+        )
+
+    if not submit_res or submit_res.get("error") or (isinstance(submit_res.get("status"), int) and submit_res["status"] >= 400):
+        err_msg = submit_res.get("error", submit_res.get("data", "Submit failed")) if isinstance(submit_res, dict) else "Submit failed"
+        raise HTTPException(submit_res.get("status", 502) if isinstance(submit_res, dict) else 502, err_msg)
+
+    submit_data = submit_res.get("data", submit_res)
+
+    # 2. Extract media identifiers
+    media_id = None
+    media_list = submit_res.get("media") or (submit_data.get("media") if isinstance(submit_data, dict) else [])
+    if media_list and isinstance(media_list[0], dict):
+        media_id = media_list[0].get("name")
+
+    workflows = submit_res.get("workflows") or (submit_data.get("workflows") if isinstance(submit_data, dict) else [])
+    if workflows and isinstance(workflows[0], dict) and not media_id:
+        media_id = workflows[0].get("primary_media_id")
+
+    operations = submit_res.get("operations") or (submit_data.get("operations") if isinstance(submit_data, dict) else [])
+    if not operations and isinstance(submit_data, dict):
+        operations = submit_data.get("flowkitPolling", {}).get("operations", [])
+
+    # 3. Polling loop
+    download_url = None
+    deadline = time.time() + body.timeout_seconds
+    while time.time() < deadline:
+        await asyncio.sleep(4)
+
+        if media_id:
+            try:
+                media_res = await client.get_media(media_id)
+                mdata = media_res.get("data", media_res) if isinstance(media_res, dict) else {}
+                v_url = (mdata.get("video", {}) or {}).get("fifeUrl")
+                i_url = (mdata.get("image", {}) or {}).get("fifeUrl")
+                download_url = mdata.get("url") or v_url or i_url
+                if download_url:
+                    break
+            except Exception as e:
+                logger.debug("get_media poll for %s: %s", media_id, e)
+
+        if workflows and not download_url:
+            try:
+                omni_status = await check_omni_flash_status(workflows, project_id=project_id)
+                wf_list = omni_status.get("workflows") or []
+                if wf_list and isinstance(wf_list[0], dict):
+                    w0 = wf_list[0]
+                    if w0.get("status") == "MEDIA_GENERATION_STATUS_SUCCESSFUL" or w0.get("done"):
+                        download_url = w0.get("media", {}).get("url")
+                        media_id = w0.get("primary_media_id") or media_id
+                        if download_url:
+                            break
+                    elif w0.get("status") == "FAILED":
+                        raise HTTPException(502, f"Omni Flash render thất bại: {w0.get('error')}")
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.debug("check_omni_flash_status poll: %s", e)
+
+        if operations and not download_url:
+            try:
+                op_status = await client.check_video_status(operations)
+                ops_list = op_status.get("data", {}).get("operations", [])
+                if ops_list and isinstance(ops_list[0], dict):
+                    op0 = ops_list[0]
+                    if op0.get("status") == "MEDIA_GENERATION_STATUS_SUCCESSFUL":
+                        meta_vid = op0.get("operation", {}).get("metadata", {}).get("video", {})
+                        download_url = meta_vid.get("fifeUrl")
+                        media_id = meta_vid.get("mediaId") or media_id
+                        if download_url:
+                            break
+                    elif op0.get("status") == "MEDIA_GENERATION_STATUS_FAILED":
+                        raise HTTPException(502, f"Veo render thất bại: {op0.get('error')}")
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.debug("check_video_status poll: %s", e)
+
+    if not download_url:
+        raise HTTPException(504, f"Quá thời gian chờ render video từ Google Flow (> {body.timeout_seconds}s)")
+
+    # 4. Download file
+    FLOW_VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+    file_prefix = media_id or f"video_{int(time.time())}"
+    orig_path = FLOW_VIDEOS_DIR / f"{file_prefix}.mp4"
+    clean_path = FLOW_VIDEOS_DIR / f"{file_prefix}_clean.mp4"
+
+    await asyncio.to_thread(download_media_file, download_url, str(orig_path))
+
+    # 5. Delogo
+    watermark_removed = False
+    if body.auto_delogo:
+        watermark_removed = await asyncio.to_thread(run_delogo, str(orig_path), str(clean_path), True)
+
+    target_file = clean_path if watermark_removed else orig_path
+
+    return {
+        "status": "COMPLETED",
+        "media_id": media_id,
+        "clean_url": f"/api/flow/file?path={quote(str(target_file))}",
+        "clean_file_path": str(target_file),
+        "original_url": download_url,
+        "original_file_path": str(orig_path),
+        "watermark_removed": watermark_removed,
+        "elapsed_seconds": round(time.time() - start_time, 2),
+        "duration_s": body.duration_s,
+        "aspect_ratio": body.aspect_ratio,
+        "resolution": body.resolution,
+    }
+
+
+@router.post(
+    "/remove-watermark",
+    response_model=RemoveWatermarkResponse,
+    tags=[TAG_WATERMARK],
+    summary="Xóa Watermark từ file, URL hoặc media_id (Lossless)",
+    description=(
+        "Loại bỏ watermark Google bằng thuật toán Lossless Reverse Alpha Blending từ:\n"
+        "- `file_path`: Đường dẫn file ảnh/video trên máy chủ.\n"
+        "- `url`: Đường dẫn URL tải trực tiếp (FifeUrl hoặc web URL).\n"
+        "- `media_id`: UUID media của Google Flow."
+    ),
+)
+async def remove_watermark(body: RemoveWatermarkRequest):
+    """Remove watermark from file_path, direct URL, or Google Flow media_id."""
+    client = get_flow_client()
+    src_path = None
+    media_id = body.media_id
+    is_video = body.is_video
+
+    FLOW_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    if body.file_path:
+        src_p = Path(body.file_path).resolve()
+        if not src_p.exists() or not src_p.is_file():
+            raise HTTPException(404, f"File không tồn tại: {body.file_path}")
+        src_path = src_p
+        if is_video is None:
+            is_video = src_p.suffix.lower() in (".mp4", ".webm", ".mov", ".mkv")
+
+    elif body.url:
+        dl_url = body.url
+        if is_video is None:
+            is_video = ("/video/" in dl_url) or any(ext in dl_url.lower() for ext in (".mp4", ".webm"))
+        ext = ".mp4" if is_video else ".jpg"
+        src_path = FLOW_OUTPUT_DIR / f"dl_{uuid.uuid4().hex[:12]}{ext}"
+        await asyncio.to_thread(download_media_file, dl_url, str(src_path))
+
+    elif body.media_id:
+        if not client.connected:
+            raise HTTPException(503, "Extension not connected để tra cứu media_id")
+        media_res = await client.get_media(body.media_id)
+        mdata = media_res.get("data", media_res) if isinstance(media_res, dict) else {}
+        v_url = (mdata.get("video", {}) or {}).get("fifeUrl")
+        i_url = (mdata.get("image", {}) or {}).get("fifeUrl")
+        dl_url = mdata.get("url") or v_url or i_url
+        if not dl_url:
+            raise HTTPException(404, f"Không tìm thấy URL tải cho media_id: {body.media_id}")
+        if is_video is None:
+            is_video = bool(v_url) or ("/video/" in dl_url)
+        ext = ".mp4" if is_video else ".jpg"
+        src_path = FLOW_OUTPUT_DIR / f"{body.media_id}{ext}"
+        await asyncio.to_thread(download_media_file, dl_url, str(src_path))
+
+    else:
+        raise HTTPException(400, "Vui lòng cung cấp ít nhất một trong các trường: file_path, url, hoặc media_id")
+
+    ext = src_path.suffix or (".mp4" if is_video else ".jpg")
+    clean_path = src_path.with_name(f"{src_path.stem}_clean{ext}")
+    success = await asyncio.to_thread(run_delogo, str(src_path), str(clean_path), bool(is_video))
+
+    target_path = clean_path if success else src_path
+    return {
+        "status": "COMPLETED",
+        "clean_url": f"/api/flow/file?path={quote(str(target_path))}",
+        "clean_file_path": str(target_path),
+        "original_file_path": str(src_path),
+        "watermark_removed": success,
+        "is_video": bool(is_video),
+    }
+
+
+@router.post(
+    "/remove-watermark-file",
+    tags=[TAG_WATERMARK],
+    summary="Upload file media để xóa Watermark (Trả về File sạch)",
+    description=(
+        "Upload trực tiếp 1 file ảnh (JPG/PNG/WebP) hoặc video (MP4/WebM) từ máy tính của bạn.\n"
+        "Hệ thống sẽ chạy thuật toán Reverse Alpha Blending để bóc tách watermark và trả về file sạch nguyên bản."
+    ),
+)
+async def remove_watermark_file(
+    file: UploadFile = File(..., description="File ảnh (JPG/PNG/WebP) hoặc video (MP4/WebM) cần xóa watermark."),
+    is_video: Optional[bool] = Form(None, description="Tùy chọn: True nếu là video, False nếu là ảnh. Mặc định tự nhận diện theo file."),
+):
+    """Upload multipart media file, remove watermark losslessly, and return clean file directly."""
+    FLOW_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    orig_name = file.filename or "media"
+    suffix = Path(orig_name).suffix.lower()
+
+    if is_video is None:
+        is_video = suffix in (".mp4", ".webm", ".mov", ".mkv") or (file.content_type and "video" in file.content_type)
+
+    if not suffix:
+        suffix = ".mp4" if is_video else ".jpg"
+
+    file_stem = f"{uuid.uuid4().hex[:10]}_{Path(orig_name).stem}"
+    orig_file = FLOW_UPLOADS_DIR / f"{file_stem}{suffix}"
+    clean_file = FLOW_UPLOADS_DIR / f"{file_stem}_clean{suffix}"
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(422, "File tải lên rỗng")
+    with open(orig_file, "wb") as f:
+        f.write(content)
+
+    success = await asyncio.to_thread(run_delogo, str(orig_file), str(clean_file), bool(is_video))
+    target_file = clean_file if success else orig_file
+
+    media_type = file.content_type
+    if not media_type:
+        media_type = "video/mp4" if is_video else "image/jpeg"
+
+    clean_filename = f"clean_{orig_name}"
+    return FileResponse(
+        target_file,
+        media_type=media_type,
+        filename=clean_filename,
+        headers={
+            "X-Watermark-Removed": str(success).lower(),
+            "Content-Disposition": f'inline; filename="{clean_filename}"',
+        },
+    )
+
+
+@router.get(
+    "/file",
+    tags=[TAG_IMAGE, TAG_VIDEO, TAG_WATERMARK],
+    summary="Tải hoặc xem trực tiếp file media đã tạo",
+    description="Stream trực tiếp hoặc tải về file media (ảnh hoặc video) tạo bởi FlowKit.",
+)
+async def serve_flow_file(path: str, download: bool = False):
+    """Stream or download a local generated or cleaned media file."""
+    resolved = Path(path).resolve()
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(404, "File media không tồn tại")
+
+    import tempfile
+    allowed_dirs = [
+        BASE_DIR.resolve(),
+        OUTPUT_DIR.resolve(),
+        Path("/tmp").resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    ]
+    if not any(str(resolved).startswith(str(d)) for d in allowed_dirs):
+        raise HTTPException(403, "Đường dẫn file không nằm trong danh mục cho phép truy cập")
+
+    suffix = resolved.suffix.lower()
+    media_type = "application/octet-stream"
+    if suffix in (".jpg", ".jpeg"):
+        media_type = "image/jpeg"
+    elif suffix == ".png":
+        media_type = "image/png"
+    elif suffix == ".webp":
+        media_type = "image/webp"
+    elif suffix == ".mp4":
+        media_type = "video/mp4"
+    elif suffix == ".webm":
+        media_type = "video/webm"
+
+    headers = {}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="{resolved.name}"'
+    else:
+        headers["Content-Disposition"] = f'inline; filename="{resolved.name}"'
+
+    return FileResponse(resolved, media_type=media_type, headers=headers)

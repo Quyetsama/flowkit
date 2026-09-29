@@ -131,6 +131,10 @@ OPENAPI_TAGS = [
         "description": "Gửi nhiều prompt tạo ảnh/video cùng lúc vào hàng đợi tự động phân bổ và xử lý nền.",
     },
     {
+        "name": "💧 Xóa Watermark (Watermark Removal)",
+        "description": "Thuật toán giải mã ngược ma trận alpha (Lossless Reverse Alpha Blending) bóc tách và xóa sạch 100% watermark Google trên ảnh và video mà không làm mờ, không suy giảm chi tiết.",
+    },
+    {
         "name": "💳 Trạng Thái & Credits (Status & Credits)",
         "description": "Kiểm tra số dư credit Google Flow, tình trạng kết nối Extension/Chrome CDP và điều khiển cơ chế cooldown bảo vệ tài khoản.",
     },
@@ -142,7 +146,7 @@ app = FastAPI(
         "Hệ thống API tự động hóa Google Flow (Nano Banana, Gemini Omni Flash, Veo 2).\n\n"
         "👉 **Trang Swagger chuyên biệt cho Tạo Ảnh & Video: [/swagger](/swagger)**"
     ),
-    version="1.2.1",
+    version="1.3.0",
     openapi_tags=OPENAPI_TAGS,
     lifespan=lifespan,
 )
@@ -258,6 +262,8 @@ async def openapi_generation_schema():
         "/api/flow/check-",
         "/api/flow/upscale-video",
         "/api/flow/refresh-urls/",
+        "/api/flow/remove-watermark",
+        "/api/flow/file",
         "/api/flow/credits",
         "/api/flow/status",
         "/api/flow/clear-hijack",
@@ -282,19 +288,21 @@ async def openapi_generation_schema():
     return {
         "openapi": full_schema.get("openapi", "3.1.0"),
         "info": {
-            "title": "FlowKit — Swagger API Tạo Ảnh & Video (Google Flow)",
+            "title": "FlowKit — Swagger API Tạo Ảnh & Video & Xóa Watermark (Google Flow)",
             "description": (
-                "## 🎨 & 🎬 FlowKit Generation API Documentation\n\n"
-                "Giao diện Swagger tương tác trực tiếp để kiểm thử và tích hợp các API tạo hình ảnh và video AI của **Google Flow** (Nano Banana, Gemini Omni Flash, Veo 2).\n\n"
-                "### 💡 Hướng dẫn nhanh:\n"
-                "- **1. Tạo ảnh (Nano Banana)**: Dùng `POST /api/flow/generate-image`.\n"
-                "- **2. Tạo video từ chữ (Omni Flash Text-to-Video)**: Dùng `POST /api/flow/generate-video-omni-text` (chọn duration 4/6/8/10s).\n"
-                "- **3. Tạo video từ ảnh (First frame / Image-to-Video)**: Upload ảnh qua `POST /api/flow/upload-image-file` lấy `media_id`, sau đó gọi `POST /api/flow/generate-video`.\n"
-                "- **4. Polling trạng thái render video**: Dùng `POST /api/flow/check-status` với workflow object trả về.\n"
-                "- **5. Tạo hàng loạt**: Dùng `POST /api/requests/batch` và kiểm tra qua `GET /api/requests/batch-status`.\n"
-                "- **6. Kiểm tra Credit**: Xem số dư tại `GET /api/flow/credits`.\n"
+                "## 🎨, 🎬 & 💧 FlowKit Generation & Watermark Removal API Documentation\n\n"
+                "Giao diện Swagger tương tác trực tiếp để kiểm thử và tích hợp các API tạo hình ảnh, video AI của **Google Flow** (Nano Banana, Gemini Omni Flash, Veo 2) kèm theo **quy trình tự động xóa sạch 100% Watermark Google** bằng thuật toán giải mã ngược ma trận alpha kênh (Lossless Reverse Alpha Blending).\n\n"
+                "### 🚀 Quy trình trọn gói (Full Pipeline):\n"
+                "- **1. Tạo ảnh sạch (Nano Banana)**: Dùng `POST /api/flow/generate-image` (mặc định `auto_delogo: true`, tự động xóa watermark và trả link `clean_url`).\n"
+                "- **2. Tạo video trọn gói (Full Pipeline: Generate -> Poll -> Delogo -> Clean Video)**: Dùng `POST /api/flow/generate-video-full`. API tự động submit prompt, chờ Google Flow render xong, tải video về và bóc tách watermark, trả link `clean_url` sẵn sàng sử dụng!\n"
+                "- **3. Tạo video từ chữ (Omni Flash Text-to-Video)**: Dùng `POST /api/flow/generate-video-omni-text` (chọn duration 4/6/8/10s).\n"
+                "- **4. Tạo video từ ảnh (First frame / Image-to-Video)**: Upload ảnh qua `POST /api/flow/upload-image-file` lấy `media_id`, sau đó gọi `POST /api/flow/generate-video`.\n"
+                "- **5. Xóa Watermark độc lập**: Dùng `POST /api/flow/remove-watermark-file` để upload file trực tiếp từ máy tính, hoặc `POST /api/flow/remove-watermark` để xử lý theo `media_id`, `url`, hoặc `file_path`.\n"
+                "- **6. Xem & tải file sạch**: Truy cập trực tiếp qua `GET /api/flow/file?path=...`.\n"
+                "- **7. Hàng đợi tạo hàng loạt**: Dùng `POST /api/requests/batch` và kiểm tra qua `GET /api/requests/batch-status`.\n"
+                "- **8. Kiểm tra Credit**: Xem số dư tại `GET /api/flow/credits`.\n"
             ),
-            "version": "1.2.1",
+            "version": "1.3.0",
         },
         "tags": filtered_tags or OPENAPI_TAGS,
         "paths": filtered_paths,

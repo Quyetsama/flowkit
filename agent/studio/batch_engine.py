@@ -37,19 +37,16 @@ def slugify(text: str, max_words: int = 6) -> str:
     return slug or "item"
 
 
-ALPHA_48_PATH = Path(__file__).parent / "assets" / "alpha_48.npy"
-
-
-def load_watermark_alpha_48():
-    """Load the pre-calibrated 48x48 alpha channel map for Google watermark."""
-    try:
-        import numpy as np
-
-        if ALPHA_48_PATH.exists():
-            return np.load(str(ALPHA_48_PATH))
-    except Exception as exc:
-        logger.warning("Could not load alpha_48.npy: %s", exc)
-    return None
+from agent.services.watermark_remover import (
+    ALPHA_48_PATH,
+    load_watermark_alpha_48,
+    get_media_dimensions,
+    get_delogo_filter,
+    remove_image_watermark_lossless,
+    remove_video_watermark_lossless,
+    run_delogo,
+    download_media_file,
+)
 
 
 class BatchEngine:
@@ -416,398 +413,27 @@ class BatchEngine:
 
     def _download_file(self, url: str, target_path: str) -> None:
         """Download remote url with stream to target file."""
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-        )
-        with urllib.request.urlopen(req, timeout=60) as resp, open(target_path, "wb") as out:
-            shutil.copyfileobj(resp, out)
+        download_media_file(url, target_path)
+
     def _remove_image_watermark_lossless(self, src: str, dst: str) -> bool:
         """Mathematically reconstruct original pixels using Reverse Alpha Blending (lossless, zero blur)."""
-        try:
-            import base64
-            import cv2
-            import numpy as np
-        except ImportError:
-            return False
-
-        try:
-            img = cv2.imread(src)
-            if img is None:
-                return False
-            h, w, _ = img.shape
-
-            alpha_48 = load_watermark_alpha_48()
-            if alpha_48 is None:
-                return False
-
-            scale_factor = 2 if (h >= 1500 and w >= 1500) else 1
-            box_size = 48 * scale_factor
-
-            # Deterministic Google Imagen 3 anchor placement:
-            # Square (1:1): margin 78 + box 48 = 126
-            # Non-square (16:9, 9:16, etc.): margin 73 + box 48 = 121
-            is_square = abs(w - h) < 50
-            offset = (126 if is_square else 121) * scale_factor
-            expected_x = w - offset
-            expected_y = h - offset
-
-            # Check if watermark is already absent (e.g. clean input or solid flat background)
-            patch_chk = img[expected_y : expected_y + box_size, expected_x : expected_x + box_size].astype(float)
-            bg_left = img[expected_y : expected_y + box_size, max(0, expected_x - box_size) : expected_x].astype(float)
-            if patch_chk.shape == bg_left.shape:
-                diff_mean = np.mean(patch_chk) - np.mean(bg_left)
-                patch_std = np.std(patch_chk)
-                if patch_std < 2.5 and abs(diff_mean) < 1.0:
-                    shutil.copyfile(src, dst)
-                    return True
-
-            template = (
-                cv2.resize(alpha_48, (box_size, box_size), interpolation=cv2.INTER_LINEAR)
-                if scale_factor != 1
-                else alpha_48.copy()
-            )
-
-            # Local search within strict +- 2 pixels to refine sub-pixel positioning
-            search_r = 2 * scale_factor
-            roi_x1 = max(0, expected_x - search_r)
-            roi_y1 = max(0, expected_y - search_r)
-            roi_x2 = min(w, expected_x + box_size + search_r)
-            roi_y2 = min(h, expected_y + box_size + search_r)
-
-            sub_corner = cv2.cvtColor(img[roi_y1:roi_y2, roi_x1:roi_x2], cv2.COLOR_BGR2GRAY).astype(np.float32)
-            template_norm = (template / template.max() * 255.0).astype(np.float32)
-
-            res = cv2.matchTemplate(sub_corner, template_norm, cv2.TM_CCOEFF_NORMED)
-            _, max_v, _, max_l = cv2.minMaxLoc(res)
-
-            cand_x = roi_x1 + max_l[0]
-            cand_y = roi_y1 + max_l[1]
-
-            # Only accept jitter if high confidence (>= 0.70) and within 1 pixel
-            if max_v >= 0.70 and abs(cand_x - expected_x) <= 1 * scale_factor and abs(cand_y - expected_y) <= 1 * scale_factor:
-                best_x, best_y = cand_x, cand_y
-            else:
-                best_x, best_y = expected_x, expected_y
-
-            best_x = max(0, min(w - box_size, best_x))
-            best_y = max(0, min(h - box_size, best_y))
-
-            # Zero out alpha noise below 0.02 to eliminate rectangle outline artifact
-            # from measurement noise at the border of the calibration grid
-            template[template < 0.02] = 0.0
-
-            patch = img[best_y : best_y + box_size, best_x : best_x + box_size].astype(np.float32)
-            a = np.clip(template * 0.60, 0.0, 0.95)[:, :, np.newaxis]
-
-            # Only unblend pixels where alpha > 0; leave untouched pixels pristine
-            unblended = patch.copy()
-            active = a[:, :, 0] > 0
-            unblended[active] = np.clip(
-                (patch[active] - 255.0 * a[active]) / (1.0 - a[active]), 0, 255
-            )
-            unblended = unblended.astype(np.uint8)
-
-            img[best_y : best_y + box_size, best_x : best_x + box_size] = unblended
-
-            ext = Path(dst).suffix.lower()
-            if ext in (".jpg", ".jpeg"):
-                return cv2.imwrite(dst, img, [cv2.IMWRITE_JPEG_QUALITY, 96])
-            elif ext == ".png":
-                return cv2.imwrite(dst, img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
-            elif ext == ".webp":
-                return cv2.imwrite(dst, img, [cv2.IMWRITE_WEBP_QUALITY, 96])
-            return cv2.imwrite(dst, img)
-        except Exception as exc:
-            logger.warning("Lossless watermark removal failed, falling back: %s", exc)
-            return False
+        return remove_image_watermark_lossless(src, dst)
 
     def _get_media_dimensions(self, file_path: str) -> tuple[int, int] | None:
         """Extract width and height using ffprobe if available."""
-        if not shutil.which("ffprobe"):
-            return None
-        cmd = [
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height",
-            "-of",
-            "csv=s=x:p=0",
-            file_path,
-        ]
-        try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            if res.returncode == 0 and res.stdout.strip():
-                parts = res.stdout.strip().split("x")
-                if len(parts) >= 2:
-                    return int(parts[0]), int(parts[1])
-        except Exception as exc:
-            logger.debug("Failed to probe dimensions for %s: %s", file_path, exc)
-        return None
+        return get_media_dimensions(file_path)
 
     def _remove_video_watermark_lossless(self, src: str, dst: str) -> bool:
         """Remove watermark from video using frame-by-frame reverse alpha blending via FFmpeg pipe."""
-        try:
-            import numpy as np
-        except ImportError:
-            return False
-
-        alpha_48 = load_watermark_alpha_48()
-        if alpha_48 is None:
-            return False
-
-        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-            return False
-
-        # Get video dimensions and fps
-        dims = self._get_media_dimensions(src)
-        if not dims:
-            return False
-        width, height = dims
-
-        try:
-            probe_cmd = [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
-                "-show_streams", "-select_streams", "v:0", src,
-            ]
-            probe_res = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
-            if probe_res.returncode != 0:
-                return False
-            vstream = json.loads(probe_res.stdout)["streams"][0]
-            fps_str = vstream.get("r_frame_rate", "24/1")
-        except Exception:
-            fps_str = "24/1"
-
-        # Prepare alpha template (threshold noise, same as image method)
-        template = alpha_48.copy()
-        template[template < 0.02] = 0.0
-
-        # Determine watermark anchor based on resolution
-        # Empirically calibrated: 1280x720 → offset 144 from bottom-right
-        # Scale proportionally for other resolutions
-        is_square = abs(width - height) < 50
-        if is_square:
-            offset = 126
-        elif width == 1280 and height == 720:
-            offset = 144
-        else:
-            # Proportional scaling from 1280x720 baseline (offset 144)
-            scale = max(width, height) / 1280.0
-            offset = round(144 * scale)
-
-        box_size = 48
-        best_x = max(0, min(width - box_size, width - offset))
-        best_y = max(0, min(height - box_size, height - offset))
-
-        # Verify watermark presence across multiple sample frames (25%, 50%, 75%)
-        # Single frame-0 check can produce false negatives if frame 0 has motion, textures, or fade-in
-        try:
-            import cv2
-
-            template_norm = (template / max(template.max(), 1e-6) * 255.0).astype(np.float32)
-            cap = cv2.VideoCapture(src)
-            if cap.isOpened():
-                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                sample_indices = [int(total_frames * p) for p in (0.25, 0.50, 0.75)] if total_frames > 3 else [0]
-                best_score = -1.0
-                best_loc = (best_x, best_y)
-                search_r = 4
-
-                for idx in sample_indices:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-                    ret, fr = cap.read()
-                    if not ret or fr is None:
-                        continue
-                    gray = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                    sy = max(0, best_y - search_r)
-                    sx = max(0, best_x - search_r)
-                    ey = min(height, best_y + box_size + search_r)
-                    ex = min(width, best_x + box_size + search_r)
-                    sub = gray[sy:ey, sx:ex]
-
-                    if sub.shape[0] >= box_size and sub.shape[1] >= box_size:
-                        res = cv2.matchTemplate(sub, template_norm, cv2.TM_CCOEFF_NORMED)
-                        _, max_v, _, max_l = cv2.minMaxLoc(res)
-                        if max_v > best_score:
-                            best_score = max_v
-                            best_loc = (sx + max_l[0], sy + max_l[1])
-
-                cap.release()
-
-                # Clean video has negative or near-zero scores (typically < 0.10)
-                # Any genuine watermark scores >= 0.60 in at least one frame
-                # If best_score remains -1.0 (unreadable), proceed with deterministic anchor
-                if best_score > -0.99 and best_score < 0.30:
-                    logger.info("Video watermark not detected (best_score=%.3f), skipping lossless removal", best_score)
-                    shutil.copyfile(src, dst)
-                    return True
-
-                # Refine anchor if high confidence and within +-2px
-                cand_x, cand_y = best_loc
-                if best_score >= 0.70 and abs(cand_x - best_x) <= 2 and abs(cand_y - best_y) <= 2:
-                    best_x, best_y = cand_x, cand_y
-
-        except Exception as exc:
-            logger.debug("Video watermark probe failed, using default anchor: %s", exc)
-
-        best_x = max(0, min(width - box_size, best_x))
-        best_y = max(0, min(height - box_size, best_y))
-
-        # Pre-compute alpha mask
-        a = np.clip(template * 0.60, 0.0, 0.95)[:, :, np.newaxis]
-        active = a[:, :, 0] > 0
-
-        reader = None
-        writer = None
-        try:
-            reader = subprocess.Popen(
-                ["ffmpeg", "-i", src, "-f", "rawvideo", "-pix_fmt", "bgr24", "-v", "quiet", "-"],
-                stdout=subprocess.PIPE,
-            )
-            writer = subprocess.Popen(
-                [
-                    "ffmpeg", "-y",
-                    "-f", "rawvideo", "-pix_fmt", "bgr24",
-                    "-s", f"{width}x{height}", "-r", fps_str,
-                    "-i", "-",
-                    "-i", src,
-                    "-map", "0:v", "-map", "1:a?",
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                    "-c:a", "copy",
-                    "-v", "quiet",
-                    dst,
-                ],
-                stdin=subprocess.PIPE,
-            )
-
-            frame_size = width * height * 3
-            frame_count = 0
-
-            while True:
-                raw = reader.stdout.read(frame_size)
-                if len(raw) < frame_size:
-                    break
-
-                frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3)).copy()
-                patch = frame[best_y : best_y + box_size, best_x : best_x + box_size].astype(np.float32)
-                unblended = patch.copy()
-                unblended[active] = np.clip(
-                    (patch[active] - 255.0 * a[active]) / (1.0 - a[active]), 0, 255
-                )
-                frame[best_y : best_y + box_size, best_x : best_x + box_size] = unblended.astype(np.uint8)
-                writer.stdin.write(frame.tobytes())
-                frame_count += 1
-
-            writer.stdin.close()
-            reader.stdout.close()
-            writer.wait(timeout=30)
-            reader.wait(timeout=10)
-
-            if writer.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
-                logger.info("Video watermark removed (lossless, %d frames)", frame_count)
-                return True
-            else:
-                logger.warning("Video lossless delogo writer failed (rc=%s)", writer.returncode)
-                if os.path.exists(dst):
-                    os.remove(dst)
-                return False
-
-        except Exception as exc:
-            logger.warning("Video lossless watermark removal failed: %s", exc)
-            for p in [reader, writer]:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
-            if os.path.exists(dst):
-                os.remove(dst)
-            return False
+        return remove_video_watermark_lossless(src, dst)
 
     def _get_delogo_filter(self, width: int, height: int, is_video: bool = True) -> str:
         """Calculate delogo filter parameters matching Google watermark placement."""
-        if is_video:
-            max_dim = max(width, height)
-            if max_dim >= 1800:
-                w, h = 95, 95
-                offset_x, offset_y = 220, 215
-            elif max_dim >= 1100:
-                w, h = 65, 65
-                offset_x, offset_y = 150, 145
-            else:
-                w, h = 45, 45
-                offset_x, offset_y = 90, 85
-        else:
-            min_dim = min(width, height)
-            if min_dim >= 1500:
-                w, h = 100, 100
-                offset_x, offset_y = 175, 175
-            elif min_dim >= 700:
-                w, h = 72, 72
-                offset_x, offset_y = 125, 125
-            else:
-                w, h = 50, 50
-                offset_x, offset_y = 90, 90
-
-        x = max(0, min(width - w, width - offset_x))
-        y = max(0, min(height - h, height - offset_y))
-        return f"delogo=x={x}:y={y}:w={w}:h={h}"
+        return get_delogo_filter(width, height, is_video=is_video)
 
     def _run_delogo(self, src: str, dst: str, is_video: bool = True) -> bool:
         """Execute delogo to remove bottom-right Google watermark."""
-        if not os.path.exists(src):
-            logger.warning("Source file not found for delogo: %s", src)
-            return False
-
-        if not is_video:
-            if self._remove_image_watermark_lossless(src, dst):
-                return True
-            logger.info("Reverse alpha blending skipped, falling back to FFmpeg delogo")
-        else:
-            if self._remove_video_watermark_lossless(src, dst):
-                return True
-            logger.info("Video lossless removal skipped, falling back to FFmpeg delogo")
-
-        dims = self._get_media_dimensions(src)
-        if dims:
-            width, height = dims
-        else:
-            width, height = (1280, 720) if is_video else (1024, 1024)
-
-        delogo_vf = self._get_delogo_filter(width, height, is_video=is_video)
-
-        if is_video:
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-i",
-                src,
-                "-vf",
-                delogo_vf,
-                "-c:a",
-                "copy",
-                dst,
-            ]
-        else:
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-i",
-                src,
-                "-vf",
-                delogo_vf,
-                "-q:v",
-                "2",
-                dst,
-            ]
-        try:
-            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
-            return res.returncode == 0 and os.path.exists(dst)
-        except Exception as exc:
-            logger.warning("FFmpeg delogo failed for %s: %s", src, exc)
-            return False
+        return run_delogo(src, dst, is_video=is_video)
 
     def _save_results(self) -> None:
         """Export results.json and results.csv into output directory."""
