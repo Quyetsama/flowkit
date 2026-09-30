@@ -70,11 +70,16 @@ _flow_round_robin_counter = 0
 async def resolve_profile_target(
     profile_id: Optional[str] = None,
     cdp_endpoint: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """Resolves (cdp_endpoint, active_project_id, profile_id).
 
-    If explicit cdp_endpoint or profile_id is provided, routes to that Chrome profile.
-    If omitted, automatically round-robins across all active connected Chrome profiles.
+    If explicit cdp_endpoint is provided, routes to that Chrome profile.
+    If explicit profile_id is provided, routes to that profile (auto-launching if offline and unquarantined).
+    If omitted:
+      1. Checks connected active profiles and round-robins.
+      2. If NO active profiles are connected, auto-launches an unquarantined profile on-demand (max 5 active).
+      3. Automatically ensures the profile navigates to the requested project_id if provided.
     """
     global _flow_round_robin_counter
 
@@ -83,6 +88,8 @@ async def resolve_profile_target(
         ep = cdp_endpoint.strip().rstrip("/")
         for p in profile_manager.list_profiles():
             if f":{p.cdp_port}" in ep:
+                if project_id and p.active_project_id != project_id:
+                    await profile_manager.navigate_profile_to_project(p, project_id)
                 return ep, p.active_project_id, p.id
         return ep, None, None
 
@@ -90,14 +97,37 @@ async def resolve_profile_target(
     if profile_id and profile_id.strip():
         p = profile_manager.get_profile(profile_id.strip())
         if p:
-            ep = f"http://127.0.0.1:{p.cdp_port}"
-            return ep, p.active_project_id, p.id
+            if not p.is_connected:
+                # If unquarantined, auto-launch on demand
+                launched = await profile_manager.auto_launch_profiles(
+                    count=1,
+                    project_id=project_id,
+                    preferred_profile_id=p.id,
+                )
+                if launched:
+                    p = launched[0]
+            elif project_id and p.active_project_id != project_id:
+                await profile_manager.navigate_profile_to_project(p, project_id)
 
-    # 3. Auto Load-Balancing: Round-robin across active connected profiles
+            if p.is_connected:
+                ep = f"http://127.0.0.1:{p.cdp_port}"
+                return ep, p.active_project_id, p.id
+
+    # 3. Auto Load-Balancing: check active connected profiles
     connected = await profile_manager.get_active_connected_profiles()
+    if not connected:
+        # No profile is active! Auto-launch on-demand up to 1 profile for this request (respecting max 5 active cap)
+        logger.info("[FlowKit MultiProfile] No active profiles found. Auto-launching profile on-demand...")
+        launched = await profile_manager.auto_launch_profiles(count=1, project_id=project_id)
+        if launched:
+            connected = launched
+
     if connected:
         selected = connected[_flow_round_robin_counter % len(connected)]
         _flow_round_robin_counter += 1
+        if project_id and selected.active_project_id != project_id:
+            await profile_manager.navigate_profile_to_project(selected, project_id)
+
         ep = f"http://127.0.0.1:{selected.cdp_port}"
         logger.info(
             "[FlowKit MultiProfile] Auto-routing request to profile %s (%s) on %s (active: %d)",
@@ -818,9 +848,9 @@ async def generate_image(body: GenerateImageRequest):
     removes the Google watermark using Lossless Reverse Alpha Blending.
     """
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
-    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint, body.project_id)
+    if not client.connected and not target_cdp:
+        raise HTTPException(503, "Không có Chrome profile hoặc extension nào đang kết nối. Vui lòng mở Chrome hoặc kiểm tra lại tab Profiles.")
     project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     data = body.model_dump(exclude={"reference_media_ids", "auto_delogo", "profile_id", "cdp_endpoint"})
     data["project_id"] = project_id
@@ -886,9 +916,9 @@ async def generate_video(body: GenerateVideoRequest):
     ``flowkitPolling.mode=batch_operation`` and are polled through ``/check-status``.
     """
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
-    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint, body.project_id)
+    if not client.connected and not target_cdp:
+        raise HTTPException(503, "Không có Chrome profile hoặc extension nào đang kết nối. Vui lòng mở Chrome hoặc kiểm tra lại tab Profiles.")
     project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     credit_snapshot = await inspect_flow_credits()
 
@@ -956,9 +986,9 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
     poll its operations through ``/check-status``.
     """
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
-    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint, body.project_id)
+    if not client.connected and not target_cdp:
+        raise HTTPException(503, "Không có Chrome profile hoặc extension nào đang kết nối. Vui lòng mở Chrome hoặc kiểm tra lại tab Profiles.")
     project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     credit_snapshot = await inspect_flow_credits()
 
@@ -1013,9 +1043,9 @@ async def generate_video_omni_text(body: GenerateOmniFlashTextVideoRequest):
     Durations 4/6/8/10 seconds map to Flow's ``abra_t2v_<N>s`` models.
     """
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
-    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint, body.project_id)
+    if not client.connected and not target_cdp:
+        raise HTTPException(503, "Không có Chrome profile hoặc extension nào đang kết nối. Vui lòng mở Chrome hoặc kiểm tra lại tab Profiles.")
     project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     credit_snapshot = await inspect_flow_credits()
     try:
@@ -1054,9 +1084,9 @@ async def generate_video_omni(body: GenerateOmniFlashVideoRequest):
     workflow/media polling path.
     """
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
-    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint, body.project_id)
+    if not client.connected and not target_cdp:
+        raise HTTPException(503, "Không có Chrome profile hoặc extension nào đang kết nối. Vui lòng mở Chrome hoặc kiểm tra lại tab Profiles.")
     project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     credit_snapshot = await inspect_flow_credits()
     try:
@@ -1449,10 +1479,10 @@ async def upload_image_file(
 async def generate_video_full(body: GenerateVideoFullRequest):
     """Full-pipeline video generation: Submit -> Poll -> Download -> Delogo -> Return clean media."""
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
+    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint, body.project_id)
+    if not client.connected and not target_cdp:
+        raise HTTPException(503, "Không có Chrome profile hoặc extension nào đang kết nối. Vui lòng mở Chrome hoặc kiểm tra lại tab Profiles.")
 
-    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
     project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     start_time = time.time()
 

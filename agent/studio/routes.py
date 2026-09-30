@@ -60,9 +60,9 @@ async def delete_profile(profile_id: str, delete_data: bool = True):
 
 
 @router.post("/profiles/{profile_id}/launch")
-async def launch_chrome_profile(profile_id: str):
+async def launch_chrome_profile(profile_id: str, project_id: Optional[str] = None):
     """1-Click launch Chrome with the appropriate OS path and CDP flags."""
-    res = profile_manager.launch_chrome(profile_id)
+    res = profile_manager.launch_chrome(profile_id, project_id=project_id)
     if not res.get("success"):
         raise HTTPException(400, res.get("error", "Lỗi khởi động Chrome"))
     # Wait a moment then check status

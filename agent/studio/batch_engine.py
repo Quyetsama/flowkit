@@ -138,15 +138,29 @@ class BatchEngine:
                 if (target_pids is None or p.id in target_pids) and p.is_connected and (p.quarantine_until <= now)
             ]
 
+            # Auto-launch on demand if none are active (up to 5 profiles total)
             if not available_profiles:
-                # If target specified but none connected, or none connected at all
+                candidates = [
+                    p for p in all_profiles
+                    if (target_pids is None or p.id in target_pids) and not p.is_connected and (p.quarantine_until <= now)
+                ]
+                if candidates:
+                    max_to_launch = min(5, len(raw_prompts), len(candidates))
+                    logger.info("[BatchEngine] No active profiles. Auto-launching %d profile(s) on-demand...", max_to_launch)
+                    launched = await profile_manager.auto_launch_profiles(count=max_to_launch)
+                    available_profiles = [
+                        p for p in launched
+                        if p.is_connected and (target_pids is None or p.id in target_pids)
+                    ]
+
+            if not available_profiles:
                 connected_names = [p.name for p in all_profiles if p.is_connected]
                 return {
                     "success": False,
                     "error": (
-                        "Không tìm thấy Profile nào đang mở Chrome và sẵn sàng! "
+                        "Không tìm thấy Profile nào sẵn sàng và không thể tự khởi động (các tài khoản có thể đang bị tạm dừng/hết quota). "
                         f"(Đã kiểm tra: {len(all_profiles)} profiles, đang kết nối: {len(connected_names)}). "
-                        "Vui lòng bấm 'Mở Chrome' ở tab Profiles và đăng nhập Google Flow trước."
+                        "Vui lòng bấm 'Mở Chrome' thủ công ở tab Profiles để kiểm tra."
                     ),
                 }
 
