@@ -13,6 +13,7 @@ import os
 import platform
 import shutil
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -81,6 +82,7 @@ class ProfileManager:
     def __init__(self, file_path: Path = PROFILES_FILE):
         self.file_path = file_path
         self._profiles: dict[str, ProfileConfig] = {}
+        self._last_check_time: float = 0.0
         self.load()
 
     def load(self) -> None:
@@ -100,10 +102,14 @@ class ProfileManager:
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self._profiles = {
-                item["id"]: ProfileConfig(**item)
-                for item in data.get("profiles", [])
-            }
+            loaded = {}
+            for item in data.get("profiles", []):
+                # Runtime connectivity must be verified rather than blindly trusted from disk
+                item["is_connected"] = False
+                item["is_running"] = False
+                p = ProfileConfig(**item)
+                loaded[p.id] = p
+            self._profiles = loaded
         except Exception as exc:
             logger.error("Failed to load profiles.json: %s. Reinitializing defaults.", exc)
             default_p = ProfileConfig(
@@ -229,7 +235,7 @@ class ProfileManager:
         try:
             def _query_json():
                 req = urllib.request.Request(f"{cdp_url}/json", method="GET")
-                with urllib.request.urlopen(req, timeout=2) as resp:
+                with urllib.request.urlopen(req, timeout=1.0) as resp:
                     return json.loads(resp.read().decode("utf-8"))
 
             tabs = await asyncio.to_thread(_query_json)
@@ -264,7 +270,16 @@ class ProfileManager:
 
     async def check_all_profiles(self) -> list[ProfileConfig]:
         tasks = [self.check_profile_status(p) for p in self._profiles.values()]
-        return await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks)
+        self._last_check_time = time.time()
+        return results
+
+    async def get_active_connected_profiles(self, max_cache_age_s: float = 5.0) -> list[ProfileConfig]:
+        """Return profiles currently connected via CDP, refreshing if cache is older than max_cache_age_s."""
+        now = time.time()
+        if (now - self._last_check_time > max_cache_age_s) or not any(p.is_connected for p in self._profiles.values()):
+            await self.check_all_profiles()
+        return [p for p in self._profiles.values() if p.is_connected]
 
     def launch_chrome(self, profile_id: str) -> dict[str, Any]:
         """Launch Google Chrome process configured for this profile."""

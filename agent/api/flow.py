@@ -67,14 +67,14 @@ router = APIRouter(prefix="/flow")
 _flow_round_robin_counter = 0
 
 
-def resolve_profile_target(
+async def resolve_profile_target(
     profile_id: Optional[str] = None,
     cdp_endpoint: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """Resolves (cdp_endpoint, active_project_id, profile_id).
 
     If explicit cdp_endpoint or profile_id is provided, routes to that Chrome profile.
-    If omitted, automatically round-robins across all connected Chrome profiles.
+    If omitted, automatically round-robins across all active connected Chrome profiles.
     """
     global _flow_round_robin_counter
 
@@ -93,18 +93,18 @@ def resolve_profile_target(
             ep = f"http://127.0.0.1:{p.cdp_port}"
             return ep, p.active_project_id, p.id
 
-    # 3. Auto Load-Balancing: Round-robin across connected profiles
-    all_profiles = profile_manager.list_profiles()
-    connected = [p for p in all_profiles if p.is_connected]
+    # 3. Auto Load-Balancing: Round-robin across active connected profiles
+    connected = await profile_manager.get_active_connected_profiles()
     if connected:
         selected = connected[_flow_round_robin_counter % len(connected)]
         _flow_round_robin_counter += 1
         ep = f"http://127.0.0.1:{selected.cdp_port}"
         logger.info(
-            "[FlowKit MultiProfile] Auto-routing request to profile %s (%s) on %s",
+            "[FlowKit MultiProfile] Auto-routing request to profile %s (%s) on %s (active: %d)",
             selected.id,
             selected.name,
             ep,
+            len(connected),
         )
         return ep, selected.active_project_id, selected.id
 
@@ -289,6 +289,14 @@ class GenerateVideoRequest(BaseModel):
         description="Độ phân giải video ban đầu (720p hoặc 360p).",
         examples=["720p"],
     )
+    profile_id: Optional[str] = Field(
+        default=None,
+        description="ID profile Google Flow cụ thể (vd: 'profile_1', 'profile_2'). Nếu để trống, server sẽ tự động xoay vòng qua các profile đang kết nối.",
+    )
+    cdp_endpoint: Optional[str] = Field(
+        default=None,
+        description="CDP endpoint URL cụ thể (vd: 'http://127.0.0.1:9224').",
+    )
 
 
 class GenerateVideoRefsRequest(BaseModel):
@@ -328,6 +336,14 @@ class GenerateVideoRefsRequest(BaseModel):
         default="720p",
         examples=["720p"],
     )
+    profile_id: Optional[str] = Field(
+        default=None,
+        description="ID profile Google Flow cụ thể (vd: 'profile_1', 'profile_2'). Nếu để trống, server sẽ tự động xoay vòng qua các profile đang kết nối.",
+    )
+    cdp_endpoint: Optional[str] = Field(
+        default=None,
+        description="CDP endpoint URL cụ thể (vd: 'http://127.0.0.1:9224').",
+    )
 
 
 class GenerateOmniFlashVideoRequest(BaseModel):
@@ -359,6 +375,14 @@ class GenerateOmniFlashVideoRequest(BaseModel):
     )
     user_paygate_tier: str = Field(
         default="PAYGATE_TIER_ONE",
+    )
+    profile_id: Optional[str] = Field(
+        default=None,
+        description="ID profile Google Flow cụ thể (vd: 'profile_1', 'profile_2'). Nếu để trống, server sẽ tự động xoay vòng qua các profile đang kết nối.",
+    )
+    cdp_endpoint: Optional[str] = Field(
+        default=None,
+        description="CDP endpoint URL cụ thể (vd: 'http://127.0.0.1:9224').",
     )
 
 
@@ -392,6 +416,14 @@ class GenerateOmniFlashTextVideoRequest(BaseModel):
     )
     user_paygate_tier: str = Field(
         default="PAYGATE_TIER_ONE",
+    )
+    profile_id: Optional[str] = Field(
+        default=None,
+        description="ID profile Google Flow cụ thể (vd: 'profile_1', 'profile_2'). Nếu để trống, server sẽ tự động xoay vòng qua các profile đang kết nối.",
+    )
+    cdp_endpoint: Optional[str] = Field(
+        default=None,
+        description="CDP endpoint URL cụ thể (vd: 'http://127.0.0.1:9224').",
     )
 
 
@@ -788,7 +820,7 @@ async def generate_image(body: GenerateImageRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    target_cdp, target_pid, _ = resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    target_cdp, target_pid, _ = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
     project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     data = body.model_dump(exclude={"reference_media_ids", "auto_delogo", "profile_id", "cdp_endpoint"})
     data["project_id"] = project_id
@@ -853,7 +885,8 @@ async def generate_video(body: GenerateVideoRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    project_id = await _resolve_direct_project(client, body.project_id)
+    target_cdp, target_pid, _ = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     credit_snapshot = await inspect_flow_credits()
 
     if body.model_family == "omni_flash":
@@ -867,6 +900,7 @@ async def generate_video(body: GenerateVideoRequest):
                 resolution=body.resolution,
                 aspect_ratio=body.aspect_ratio,
                 user_paygate_tier=body.user_paygate_tier,
+                cdp_endpoint=target_cdp,
             )
             if body.end_image_media_id:
                 result = await generate_omni_flash_first_last_video(
@@ -879,9 +913,11 @@ async def generate_video(body: GenerateVideoRequest):
             raise HTTPException(400, str(exc)) from exc
     else:
         payload = body.model_dump(
-            exclude={"model_family", "duration_s", "resolution"}, exclude_none=True
+            exclude={"model_family", "duration_s", "resolution", "profile_id", "cdp_endpoint"}, exclude_none=True
         )
         payload["project_id"] = project_id
+        if target_cdp:
+            payload["cdp_endpoint"] = target_cdp
         result = await client.generate_video(**payload)
 
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
@@ -916,7 +952,8 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    project_id = await _resolve_direct_project(client, body.project_id)
+    target_cdp, target_pid, _ = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     credit_snapshot = await inspect_flow_credits()
 
     if body.model_family == "omni_flash":
@@ -930,12 +967,15 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
                 resolution=body.resolution,
                 aspect_ratio=body.aspect_ratio,
                 user_paygate_tier=body.user_paygate_tier,
+                cdp_endpoint=target_cdp,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
     else:
-        payload = body.model_dump(exclude={"model_family", "duration_s", "resolution"})
+        payload = body.model_dump(exclude={"model_family", "duration_s", "resolution", "profile_id", "cdp_endpoint"})
         payload["project_id"] = project_id
+        if target_cdp:
+            payload["cdp_endpoint"] = target_cdp
         result = await client.generate_video_from_references(**payload)
 
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
@@ -966,11 +1006,14 @@ async def generate_video_omni_text(body: GenerateOmniFlashTextVideoRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    project_id = await _resolve_direct_project(client, body.project_id)
+    target_cdp, target_pid, _ = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     credit_snapshot = await inspect_flow_credits()
     try:
-        payload = body.model_dump()
+        payload = body.model_dump(exclude={"profile_id", "cdp_endpoint"})
         payload["project_id"] = project_id
+        if target_cdp:
+            payload["cdp_endpoint"] = target_cdp
         result = await generate_omni_flash_text_video(**payload)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -1001,11 +1044,14 @@ async def generate_video_omni(body: GenerateOmniFlashVideoRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    project_id = await _resolve_direct_project(client, body.project_id)
+    target_cdp, target_pid, _ = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     credit_snapshot = await inspect_flow_credits()
     try:
-        payload = body.model_dump()
+        payload = body.model_dump(exclude={"profile_id", "cdp_endpoint"})
         payload["project_id"] = project_id
+        if target_cdp:
+            payload["cdp_endpoint"] = target_cdp
         result = await generate_omni_flash_video(**payload)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -1290,7 +1336,7 @@ async def upload_image(body: UploadImageRequest):
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
 
-    target_cdp, target_pid, _ = resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    target_cdp, target_pid, _ = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
 
     if body.image_base64:
         try:
@@ -1391,7 +1437,7 @@ async def generate_video_full(body: GenerateVideoFullRequest):
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
 
-    target_cdp, target_pid, _ = resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    target_cdp, target_pid, _ = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
     project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     start_time = time.time()
 
@@ -1457,6 +1503,7 @@ async def generate_video_full(body: GenerateVideoFullRequest):
                 scene_id=body.scene_id,
                 aspect_ratio=body.aspect_ratio,
                 user_paygate_tier=body.user_paygate_tier,
+                cdp_endpoint=target_cdp,
             )
     else:
         # Default Text-to-Video via Omni Flash

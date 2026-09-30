@@ -1023,7 +1023,8 @@ class FlowClient:
                               project_id: str, scene_id: str,
                               aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
                               end_image_media_id: str = None,
-                              user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
+                              user_paygate_tier: str = "PAYGATE_TIER_TWO",
+                              cdp_endpoint: str | None = None) -> dict:
         """Submit an i2v generation. Returns operations for the poller."""
         if not USE_BATCH_RPC:
             return await self._legacy_generate_video(
@@ -1043,13 +1044,15 @@ class FlowClient:
 
         gen_type = "start_end_frame_2_video" if end_image_media_id else "frame_2_video"
         try:
-            pid = self._batch_project_id(project_id)
+            pid = self._batch_project_id(project_id, cdp_endpoint=cdp_endpoint)
             freq = fb.video_request(
                 prompt, pid, start_image_media_id, aspect=aspect_ratio,
                 model=self._batch_video_model(user_paygate_tier, gen_type, aspect_ratio),
             )
             payload = await self._batch_payload(
-                fb.RPC_GEN_VIDEO, freq, fb.CAPTCHA_VIDEO, timeout=120)
+                fb.RPC_GEN_VIDEO, freq, fb.CAPTCHA_VIDEO, timeout=120,
+                project_id=pid, cdp_endpoint=cdp_endpoint,
+            )
             operation = fb.read_operation(payload)
         except Exception as e:
             return _batch_error(e)
@@ -1060,7 +1063,8 @@ class FlowClient:
     async def generate_video_from_references(self, reference_media_ids: list[str],
                                               prompt: str, project_id: str, scene_id: str,
                                               aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
-                                              user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
+                                              user_paygate_tier: str = "PAYGATE_TIER_TWO",
+                                              cdp_endpoint: str | None = None) -> dict:
         """Generate video from multiple reference images (r2v)."""
         if not USE_BATCH_RPC:
             return await self._legacy_generate_video_from_references(
@@ -1081,7 +1085,7 @@ class FlowClient:
         return await self.generate_video(
             start_image_media_id=reference_media_ids[0], prompt=prompt,
             project_id=project_id, scene_id=scene_id, aspect_ratio=aspect_ratio,
-            user_paygate_tier=user_paygate_tier,
+            user_paygate_tier=user_paygate_tier, cdp_endpoint=cdp_endpoint,
         )
 
     async def upscale_video(self, media_id: str, scene_id: str,
