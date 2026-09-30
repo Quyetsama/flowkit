@@ -409,9 +409,16 @@
         const card = document.createElement('div');
         card.className = 'bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 hover:border-slate-700 transition flex flex-col justify-between';
         
-        const statusBadge = p.is_connected 
-          ? `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Sẵn sàng</span>`
-          : `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20"><span class="w-1.5 h-1.5 rounded-full bg-rose-400"></span> Chưa mở Chrome</span>`;
+        const isQuarantined = p.quarantine_until && p.quarantine_until > (Date.now() / 1000);
+        let statusBadge = '';
+        if (isQuarantined) {
+          const remainingMin = Math.ceil((p.quarantine_until - Date.now() / 1000) / 60);
+          statusBadge = `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20" title="${p.disabled_reason || ''}"><span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span> Tạm dừng (${remainingMin}m)</span>`;
+        } else if (p.is_connected) {
+          statusBadge = `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Sẵn sàng</span>`;
+        } else {
+          statusBadge = `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-400 border border-slate-700/80"><span class="w-1.5 h-1.5 rounded-full bg-slate-500"></span> Đã tắt</span>`;
+        }
 
         card.innerHTML = `
           <div class="space-y-3">
@@ -422,6 +429,13 @@
               </div>
               ${statusBadge}
             </div>
+
+            ${(p.disabled_reason || p.error_message) ? `
+              <div class="bg-rose-500/10 border border-rose-500/20 rounded-xl p-2.5 text-xs text-rose-300 flex items-start gap-2">
+                <i data-lucide="alert-triangle" class="w-4 h-4 text-rose-400 shrink-0 mt-0.5"></i>
+                <div class="truncate text-[11px]" title="${p.disabled_reason || p.error_message}">${p.disabled_reason || p.error_message}</div>
+              </div>
+            ` : ''}
 
             <div class="bg-slate-950 p-3 rounded-xl border border-slate-800/80 text-xs space-y-1">
               <div class="text-slate-400 flex justify-between">
@@ -435,9 +449,15 @@
           </div>
 
           <div class="flex items-center gap-2 pt-2 border-t border-slate-800/80">
-            <button onclick="launchChrome('${p.id}')" class="flex-1 py-2 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-medium flex items-center justify-center gap-1.5 transition shadow">
-              <i data-lucide="external-link" class="w-3.5 h-3.5"></i> Mở Chrome
-            </button>
+            ${p.is_connected ? `
+              <button onclick="stopChrome('${p.id}')" class="flex-1 py-2 px-3 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 rounded-xl text-xs font-medium flex items-center justify-center gap-1.5 transition shadow">
+                <i data-lucide="power" class="w-3.5 h-3.5"></i> Tắt Chrome
+              </button>
+            ` : `
+              <button onclick="launchChrome('${p.id}')" class="flex-1 py-2 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-medium flex items-center justify-center gap-1.5 transition shadow">
+                <i data-lucide="external-link" class="w-3.5 h-3.5"></i> Mở Chrome
+              </button>
+            `}
             <button onclick="checkProfile('${p.id}')" title="Kiểm tra kết nối" class="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl transition">
               <i data-lucide="refresh-cw" class="w-4 h-4"></i>
             </button>
@@ -464,6 +484,20 @@
         }
       } catch (err) {
         alert('Lỗi mở Chrome: ' + err);
+      }
+    }
+
+    async function stopChrome(profileId) {
+      try {
+        const res = await fetch(`/api/studio/profiles/${profileId}/stop`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          await loadProfiles(true);
+        } else {
+          alert('Lỗi: ' + (data.error || 'Không thể tắt Chrome'));
+        }
+      } catch (err) {
+        alert('Lỗi tắt Chrome: ' + err);
       }
     }
 

@@ -30,6 +30,9 @@ class ProfileConfig(BaseModel):
     credits_balance: int | None = None
     plan: str | None = None
     error_message: str | None = None
+    consecutive_failures: int = 0
+    quarantine_until: float = 0.0
+    disabled_reason: str | None = None
 
 
 class BatchTask(BaseModel):

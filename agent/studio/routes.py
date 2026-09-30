@@ -83,6 +83,16 @@ async def check_profile(profile_id: str):
     return {"profile": p.model_dump()}
 
 
+@router.post("/profiles/{profile_id}/stop")
+async def stop_chrome_profile(profile_id: str):
+    """Gracefully terminate Chrome for this profile to free RAM."""
+    res = await profile_manager.stop_chrome(profile_id)
+    if not res.get("success"):
+        raise HTTPException(400, res.get("error", "Lỗi tắt Chrome"))
+    p = profile_manager.get_profile(profile_id)
+    return {"success": True, "profile": p.model_dump() if p else None}
+
+
 @router.post("/batch/start")
 async def start_batch(config: BatchJobConfig):
     res = await batch_engine.start_batch(config)

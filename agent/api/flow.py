@@ -820,7 +820,7 @@ async def generate_image(body: GenerateImageRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    target_cdp, target_pid, _ = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
     project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     data = body.model_dump(exclude={"reference_media_ids", "auto_delogo", "profile_id", "cdp_endpoint"})
     data["project_id"] = project_id
@@ -830,7 +830,10 @@ async def generate_image(body: GenerateImageRequest):
     data["character_media_ids"] = refs or None
     result = await client.generate_images(**data)
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
-        raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+        err_msg = str(result.get("error", result.get("data")))
+        await profile_manager.report_profile_failure(profile_id, err_msg, auto_stop=True)
+        raise HTTPException(result.get("status", 502), err_msg)
+    profile_manager.report_profile_success(profile_id)
     res_data = result.get("data", result)
 
     if body.auto_delogo and isinstance(res_data, dict):
@@ -885,7 +888,7 @@ async def generate_video(body: GenerateVideoRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    target_cdp, target_pid, _ = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
     project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     credit_snapshot = await inspect_flow_credits()
 
@@ -921,7 +924,10 @@ async def generate_video(body: GenerateVideoRequest):
         result = await client.generate_video(**payload)
 
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
-        raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+        err_msg = str(result.get("error", result.get("data")))
+        await profile_manager.report_profile_failure(profile_id, err_msg, auto_stop=True)
+        raise HTTPException(result.get("status", 502), err_msg)
+    profile_manager.report_profile_success(profile_id)
 
     data = result.get("data", result)
     veo_model = None
@@ -952,7 +958,7 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    target_cdp, target_pid, _ = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
     project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     credit_snapshot = await inspect_flow_credits()
 
@@ -979,7 +985,10 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
         result = await client.generate_video_from_references(**payload)
 
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
-        raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+        err_msg = str(result.get("error", result.get("data")))
+        await profile_manager.report_profile_failure(profile_id, err_msg, auto_stop=True)
+        raise HTTPException(result.get("status", 502), err_msg)
+    profile_manager.report_profile_success(profile_id)
 
     data = result.get("data", result)
     veo_model = None
@@ -1006,7 +1015,7 @@ async def generate_video_omni_text(body: GenerateOmniFlashTextVideoRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    target_cdp, target_pid, _ = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
     project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     credit_snapshot = await inspect_flow_credits()
     try:
@@ -1020,10 +1029,13 @@ async def generate_video_omni_text(body: GenerateOmniFlashTextVideoRequest):
     if result.get("error") or (
         isinstance(result.get("status"), int) and result["status"] >= 400
     ):
+        err_msg = str(result.get("error", result.get("data")))
+        await profile_manager.report_profile_failure(profile_id, err_msg, auto_stop=True)
         raise HTTPException(
             result.get("status", 502),
-            result.get("error", result.get("data")),
+            err_msg,
         )
+    profile_manager.report_profile_success(profile_id)
     data = result.get("data", result)
     cost = estimate_video_generation_cost(
         model_family="omni_flash",
@@ -1044,7 +1056,7 @@ async def generate_video_omni(body: GenerateOmniFlashVideoRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    target_cdp, target_pid, _ = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
     project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     credit_snapshot = await inspect_flow_credits()
     try:
@@ -1056,7 +1068,10 @@ async def generate_video_omni(body: GenerateOmniFlashVideoRequest):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
-        raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+        err_msg = str(result.get("error", result.get("data")))
+        await profile_manager.report_profile_failure(profile_id, err_msg, auto_stop=True)
+        raise HTTPException(result.get("status", 502), err_msg)
+    profile_manager.report_profile_success(profile_id)
     data = result.get("data", result)
     cost = estimate_video_generation_cost(
         model_family="omni_flash",
@@ -1437,7 +1452,7 @@ async def generate_video_full(body: GenerateVideoFullRequest):
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
 
-    target_cdp, target_pid, _ = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
+    target_cdp, target_pid, profile_id = await resolve_profile_target(body.profile_id, body.cdp_endpoint)
     project_id = await _resolve_direct_project(client, body.project_id or target_pid or "")
     start_time = time.time()
 
@@ -1520,7 +1535,9 @@ async def generate_video_full(body: GenerateVideoFullRequest):
 
     if not submit_res or submit_res.get("error") or (isinstance(submit_res.get("status"), int) and submit_res["status"] >= 400):
         err_msg = submit_res.get("error", submit_res.get("data", "Submit failed")) if isinstance(submit_res, dict) else "Submit failed"
+        await profile_manager.report_profile_failure(profile_id, str(err_msg), auto_stop=True)
         raise HTTPException(submit_res.get("status", 502) if isinstance(submit_res, dict) else 502, err_msg)
+    profile_manager.report_profile_success(profile_id)
 
     submit_data = submit_res.get("data", submit_res)
 

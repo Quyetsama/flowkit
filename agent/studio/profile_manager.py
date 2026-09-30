@@ -12,6 +12,7 @@ import logging
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import time
 import urllib.parse
@@ -275,17 +276,32 @@ class ProfileManager:
         return results
 
     async def get_active_connected_profiles(self, max_cache_age_s: float = 5.0) -> list[ProfileConfig]:
-        """Return profiles currently connected via CDP, refreshing if cache is older than max_cache_age_s."""
+        """Return profiles currently connected via CDP and not quarantined."""
         now = time.time()
         if (now - self._last_check_time > max_cache_age_s) or not any(p.is_connected for p in self._profiles.values()):
             await self.check_all_profiles()
-        return [p for p in self._profiles.values() if p.is_connected]
+
+        active = []
+        for p in self._profiles.values():
+            if not p.is_connected or not p.is_running:
+                continue
+            if p.quarantine_until and now < p.quarantine_until:
+                # Quarantined due to error or quota
+                continue
+            active.append(p)
+        return active
 
     def launch_chrome(self, profile_id: str) -> dict[str, Any]:
         """Launch Google Chrome process configured for this profile."""
         profile = self.get_profile(profile_id)
         if not profile:
             return {"success": False, "error": f"Không tìm thấy profile '{profile_id}'"}
+
+        # Clear previous quarantine and failure states on manual launch
+        profile.consecutive_failures = 0
+        profile.quarantine_until = 0.0
+        profile.disabled_reason = None
+        profile.error_message = None
 
         chrome_path = find_chrome_executable()
         if not chrome_path:
@@ -332,6 +348,146 @@ class ProfileManager:
         except Exception as exc:
             logger.error("Failed to launch Chrome for %s: %s", profile.id, exc)
             return {"success": False, "error": str(exc)}
+
+    def _kill_chrome_process(self, profile: ProfileConfig) -> None:
+        """Kill Chrome process listening on the profile's CDP port to immediately free RAM."""
+        port = profile.cdp_port
+        sys_name = platform.system()
+        if sys_name in ("Darwin", "Linux"):
+            # 1. Kill by port listener via lsof
+            try:
+                res = subprocess.run(["lsof", "-ti", f":{port}"], capture_output=True, text=True)
+                pids = [p.strip() for p in res.stdout.split() if p.strip()]
+                for pid in pids:
+                    try:
+                        os.kill(int(pid), signal.SIGTERM)
+                    except Exception:
+                        pass
+                if pids:
+                    time.sleep(0.3)
+                    for pid in pids:
+                        try:
+                            os.kill(int(pid), signal.SIGKILL)
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.debug("lsof kill error on port %d: %s", port, e)
+
+            # 2. Kill any lingering process matching the port argument
+            try:
+                subprocess.run(["pkill", "-9", "-f", f"--remote-debugging-port={port}"], capture_output=True)
+            except Exception:
+                pass
+        elif sys_name == "Windows":
+            try:
+                res = subprocess.run(f"netstat -ano | findstr :{port}", shell=True, capture_output=True, text=True)
+                for line in res.stdout.splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 5 and "LISTENING" in parts:
+                        pid = parts[-1]
+                        subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+                subprocess.run(
+                    f'wmic process where "commandline like \'%--remote-debugging-port={port}%\'" call terminate',
+                    shell=True,
+                    capture_output=True,
+                )
+            except Exception as e:
+                logger.debug("Windows process kill error on port %d: %s", port, e)
+
+    async def stop_chrome(self, profile_id: str) -> dict[str, Any]:
+        """Gracefully close or terminate Chrome for this profile to free system RAM."""
+        profile = self.get_profile(profile_id)
+        if not profile:
+            return {"success": False, "error": f"Không tìm thấy profile '{profile_id}'"}
+
+        cdp_url = f"http://127.0.0.1:{profile.cdp_port}"
+        closed_via_cdp = False
+
+        # Attempt graceful CDP Browser.close first
+        try:
+            def _get_browser_ws():
+                req = urllib.request.Request(f"{cdp_url}/json/version", method="GET")
+                with urllib.request.urlopen(req, timeout=1.0) as resp:
+                    return json.loads(resp.read().decode("utf-8")).get("webSocketDebuggerUrl")
+
+            ws_url = await asyncio.to_thread(_get_browser_ws)
+            if ws_url:
+                import websockets
+                async with websockets.connect(ws_url, open_timeout=1.5, close_timeout=1.5) as ws:
+                    await ws.send(json.dumps({"id": 1, "method": "Browser.close"}))
+                await asyncio.sleep(0.5)
+                closed_via_cdp = True
+                logger.info("Gracefully closed Chrome via CDP Browser.close for %s", profile.id)
+        except Exception:
+            pass
+
+        # Force terminate process if still running
+        await asyncio.to_thread(self._kill_chrome_process, profile)
+
+        profile.is_running = False
+        profile.is_connected = False
+        self.save()
+        logger.info("[Resource Manager] Chrome stopped for profile %s (RAM freed)", profile.id)
+        return {"success": True, "profile_id": profile.id, "closed_via_cdp": closed_via_cdp}
+
+    def report_profile_success(self, profile_id: str | None) -> None:
+        """Called when a generation operation succeeds on this profile."""
+        if not profile_id:
+            return
+        p = self.get_profile(profile_id)
+        if p:
+            p.consecutive_failures = 0
+            if not p.disabled_reason:
+                p.error_message = None
+
+    async def report_profile_failure(self, profile_id: str | None, error: str, auto_stop: bool = True) -> bool:
+        """Record failure and trigger auto-stop (Circuit Breaker) if error is fatal or continuous.
+        Returns True if profile was automatically shut down to free RAM."""
+        if not profile_id:
+            return False
+        p = self.get_profile(profile_id)
+        if not p:
+            return False
+
+        err_low = str(error or "").lower()
+        fatal = False
+        reason = ""
+        quarantine_s = 600.0  # default 10 minutes
+
+        # Check fatal categories
+        if any(kw in err_low for kw in ("public_error_user_quota_reached", "user_quota_reached", "quota exceeded", "quota reached", "hết credit", "out of credits")):
+            fatal = True
+            reason = "Tài khoản hết Quota hôm nay (User Quota Reached)"
+            quarantine_s = 12 * 3600  # 12 hours
+        elif any(kw in err_low for kw in ("public_error_unusual_activity", "unusual activity", "extension_hijack_detected")):
+            fatal = True
+            reason = "Google phát hiện hoạt động bất thường (Unusual Activity)"
+            quarantine_s = 1800  # 30 mins
+        elif any(kw in err_low for kw in ("flow_session_unavailable", "no_flow_key", "no_at_token", "signed out", "session expired")):
+            fatal = True
+            reason = "Phiên đăng nhập Google bị văng hoặc hết hạn (Signed Out)"
+            quarantine_s = 3600  # 1 hour
+        else:
+            p.consecutive_failures += 1
+            if p.consecutive_failures >= 3:
+                fatal = True
+                reason = f"Gặp lỗi liên tiếp {p.consecutive_failures} lần ({error[:70]})"
+                quarantine_s = 900  # 15 mins
+
+        if fatal:
+            p.disabled_reason = reason
+            p.quarantine_until = time.time() + quarantine_s
+            p.error_message = f"Tự động tắt Chrome: {reason}"
+            if auto_stop:
+                logger.warning(
+                    "[Circuit Breaker] Auto-stopping Chrome for profile %s: %s (Terminating process to free RAM)",
+                    p.id,
+                    reason,
+                )
+                await self.stop_chrome(p.id)
+                return True
+
+        return False
 
 
 profile_manager = ProfileManager()

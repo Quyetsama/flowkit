@@ -131,10 +131,11 @@ class BatchEngine:
             all_profiles = profile_manager.list_profiles()
 
             # Select active profiles
+            now = time.time()
             target_pids = set(config.selected_profiles) if config.selected_profiles else None
             available_profiles = [
                 p for p in all_profiles
-                if (target_pids is None or p.id in target_pids) and p.is_connected
+                if (target_pids is None or p.id in target_pids) and p.is_connected and (p.quarantine_until <= now)
             ]
 
             if not available_profiles:
@@ -387,6 +388,7 @@ class BatchEngine:
                 task.status = "completed"
                 task.progress_percent = 100
                 task.completed_at = time.time()
+                profile_manager.report_profile_success(profile.id)
                 await self.emit_event("task_updated", task.model_dump())
 
             except Exception as exc:
@@ -396,6 +398,21 @@ class BatchEngine:
                 task.completed_at = time.time()
                 await self.emit_event("task_updated", task.model_dump())
 
+                was_stopped = await profile_manager.report_profile_failure(profile.id, str(exc), auto_stop=True)
+                if was_stopped or not profile.is_running:
+                    logger.warning(
+                        "Profile %s auto-stopped to free RAM. Re-queueing task %d for remaining workers.",
+                        profile.id,
+                        task.index,
+                    )
+                    task.status = "queued"
+                    task.error = None
+                    task.profile_id = None
+                    task.progress_percent = 0
+                    queue.put_nowait(task)
+                    await self.emit_event("task_updated", task.model_dump())
+                    break
+
             finally:
                 queue.task_done()
                 self._save_results()
@@ -404,11 +421,25 @@ class BatchEngine:
             if not queue.empty() and config.cooldown_seconds > 0:
                 await asyncio.sleep(config.cooldown_seconds)
 
-        # Check if all completed
-        if queue.empty():
+        # Check if all completed or all workers stopped
+        remaining_alive_workers = [
+            wt for wt in self._worker_tasks
+            if not wt.done() and wt is not asyncio.current_task()
+        ]
+        if not remaining_alive_workers:
+            for t in self.tasks:
+                if t.status in ("queued", "submitting"):
+                    t.status = "failed"
+                    t.error = "Không còn profile nào hoạt động (tất cả đã dừng do lỗi/hết quota)"
+                    await self.emit_event("task_updated", t.model_dump())
+            self.is_running = False
+            self._save_results()
+            await self.emit_event("batch_completed", self.get_status())
+        elif queue.empty():
             all_done = all(t.status in ("completed", "failed", "cancelled") for t in self.tasks)
             if all_done:
                 self.is_running = False
+                self._save_results()
                 await self.emit_event("batch_completed", self.get_status())
 
     def _download_file(self, url: str, target_path: str) -> None:
