@@ -6,14 +6,13 @@ __pycache__/
 *.db-journal
 .env
 output/
-youtube
+youtube/channels/
 agent/active_project.json
 
 # Generated AI tool configs (run: python setup.py)
 .claude/commands/fk-*
-.gemini/commands/
+.agents/skills/fk-*
 AGENTS.md
-GEMINI.md
 .fk-setup.json
 
 # design-sync (staged converter scripts, build output, machine state)
@@ -29,8 +28,15 @@ extension.crx
 .DS_Store
 *.mp4
 /*.png
+*.mp3
 flow_session_project.json
 .venv/
 extension/_metadata/
 scratch/
 profiles.json
+
+# oh-my-claudecode session state (plans, hud, logs) — tooling, not project content
+.omc/
+.agent/
+
+series_manifest.json

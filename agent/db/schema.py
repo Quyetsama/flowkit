@@ -8,6 +8,11 @@ logger = logging.getLogger(__name__)
 
 _db_connection: aiosqlite.Connection | None = None
 _db_lock = asyncio.Lock()
+# Guards get_db()'s lazy connect. Separate from _db_lock because crud calls
+# get_db() while holding that one. Rebuilt per event loop: a lock that has
+# been waited on is bound to its loop, and pytest runs each test in a new one.
+_db_init_lock: asyncio.Lock | None = None
+_db_init_loop: asyncio.AbstractEventLoop | None = None
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS character (
@@ -38,6 +43,7 @@ CREATE TABLE IF NOT EXISTS project (
     material TEXT DEFAULT 'realistic',
     allow_music INTEGER NOT NULL DEFAULT 0,
     allow_voice INTEGER NOT NULL DEFAULT 0,
+    video_model_family TEXT NOT NULL DEFAULT 'veo',
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
@@ -322,6 +328,9 @@ CREATE INDEX IF NOT EXISTS idx_request_scene ON request(scene_id);
         if "allow_voice" not in project_columns:
             await db.execute("ALTER TABLE project ADD COLUMN allow_voice INTEGER NOT NULL DEFAULT 0")
             logger.info("Migrated: added allow_voice column to project table")
+        if "video_model_family" not in project_columns:
+            await db.execute("ALTER TABLE project ADD COLUMN video_model_family TEXT NOT NULL DEFAULT 'veo'")
+            logger.info("Migrated: added video_model_family column to project table")
         # Migration: add orientation to video table + backfill from scene data
         cursor = await db.execute("PRAGMA table_info(video)")
         video_columns = {row[1] for row in await cursor.fetchall()}
@@ -356,17 +365,38 @@ CREATE INDEX IF NOT EXISTS idx_request_scene ON request(scene_id);
     logger.info("Database initialized at %s", DB_PATH)
 
 
+def _get_db_init_lock() -> asyncio.Lock:
+    global _db_init_lock, _db_init_loop
+    loop = asyncio.get_running_loop()
+    if _db_init_lock is None or _db_init_loop is not loop:
+        _db_init_lock = asyncio.Lock()
+        _db_init_loop = loop
+    return _db_init_lock
+
+
 async def get_db() -> aiosqlite.Connection:
-    """Return the shared database connection, creating it if needed."""
+    """Return the shared database connection, creating it if needed.
+
+    The first two callers used to race here: both saw None, both connected,
+    the second overwrote the global, and the first then ran its PRAGMAs on
+    the second's connection while a statement was open on it — failing with
+    "database table is locked" and leaking a connection (whose worker thread
+    keeps the interpreter alive). Connect under a lock, set up a local, and
+    publish it only once it is ready.
+    """
     global _db_connection
-    if _db_connection is None:
-        _db_connection = await aiosqlite.connect(str(DB_PATH))
-        _db_connection.row_factory = aiosqlite.Row
-        await _db_connection.execute("PRAGMA journal_mode=WAL")
-        await _db_connection.execute("PRAGMA foreign_keys=ON")
-        # Force WAL checkpoint so this connection sees all committed writes
-        # from previous processes (e.g. after hot-reload)
-        await _db_connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    if _db_connection is not None:
+        return _db_connection
+    async with _get_db_init_lock():
+        if _db_connection is None:
+            conn = await aiosqlite.connect(str(DB_PATH))
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA journal_mode=WAL")
+            await conn.execute("PRAGMA foreign_keys=ON")
+            # Force WAL checkpoint so this connection sees all committed writes
+            # from previous processes (e.g. after hot-reload)
+            await conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            _db_connection = conn
     return _db_connection
 
 

@@ -7,10 +7,12 @@ Usage: `/gen-chain-videos <project_id> <video_id>`
 Usage: `/fk-gen-chain-videos <project_id> <video_id> [--provider <name>]`
 
 Pass `"provider": "<name>"` on each item in the `/api/requests/batch`
-payload (`flow` | `assistant`; default is the server `DEFAULT_PROVIDER`).
+payload (`flow` | `assistant` | `muse2api`; default is the server `DEFAULT_PROVIDER`).
 The assistant provider queues a provider job — make sure a worker is running
 (see `/fk-provider`). Chained start/end frames are passed as `start_url` /
-`end_url` on the provider job, so chaining works on any provider.
+`end_url` on the provider job, so chaining works on any provider that takes an
+end frame. `muse2api` does not: chained scenes fail there unless
+`MUSE2API_ALLOW_DEGRADED=1`, which renders them as plain i2v.
 
 This creates smooth transitions between scenes in a chain by using the **NEXT scene's image as the endImage** of the current scene's video, so the last frame of scene N matches the first frame of scene N+1 → seamless concat.
 

@@ -11,6 +11,8 @@ Built-ins:
     - ``assistant`` — the local assistant (e.g. Pax/Muse) via the persistent
       provider-job queue (``provider_job`` table + ``/api/provider-jobs``).
       Always available, needs no Chrome.
+    - ``muse2api`` — a muse2api gateway (muse.ai behind an OpenAI-compatible
+      API) over HTTP. Available once ``MUSE2API_URL`` is set.
 
 Extra backends (a Sora adapter, a local SDXL worker, …) can be registered
 at startup and are then selectable per request through the ``provider``
@@ -25,6 +27,7 @@ from typing import TYPE_CHECKING
 from agent.config import DEFAULT_PROVIDER
 from agent.sdk.services.assistant_provider import AssistantProvider
 from agent.sdk.services.flow_provider import FlowProvider
+from agent.sdk.services.muse2api_provider import Muse2APIProvider
 from agent.sdk.services.provider_base import MediaProvider
 
 if TYPE_CHECKING:
@@ -45,6 +48,7 @@ class ProviderRegistry:
         if flow_client is not None:
             providers["flow"] = FlowProvider(flow_client)
         providers["assistant"] = AssistantProvider()
+        providers["muse2api"] = Muse2APIProvider()
         if extra:
             providers.update(extra)
         self._providers = providers

@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import tempfile
+import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -38,6 +39,7 @@ from agent.services.cli_providers import (  # noqa: F401  (PROVIDER_BINARIES re-
     PROVIDER_BINARIES,
     resolve_role,
 )
+from agent.utils.paths import file_url_to_path
 
 logger = logging.getLogger(__name__)
 
@@ -149,11 +151,12 @@ def _local_media_path(url: str) -> Path | None:
     """
     if not url:
         return None
-    parsed = urlparse(url)
-    if parsed.scheme == "file":
-        p = Path(parsed.path)
+    p = file_url_to_path(url)
+    if p is not None:
         return p if p.is_file() else None
-    if not parsed.scheme:
+    parsed = urlparse(url)
+    # A Windows drive letter ("C:") parses as a scheme; it is still a path.
+    if not parsed.scheme or len(parsed.scheme) == 1:
         p = Path(url)
         return p if p.is_file() else None
     return None
@@ -196,10 +199,23 @@ async def _download_via_get_media(media_id: str, dest: Path) -> None:
     logger.info("Downloaded %s via get_media (%d bytes)", media_id[:12], len(video_bytes))
 
 
+def _ffmpeg_bin() -> str:
+    env_bin = os.environ.get("FFMPEG_BIN")
+    if env_bin:
+        return env_bin
+    if shutil.which("ffmpeg"):
+        return "ffmpeg"
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 def _extract_frames(video_path: str, fps: float, out_dir: str) -> list:
     """Extract frames as JPEGs using ffmpeg. Returns sorted list of frame paths."""
     cmd = [
-        "ffmpeg", "-y", "-i", video_path,
+        _ffmpeg_bin(), "-y", "-i", video_path,
         "-vf", f"fps={fps},scale=640:-1",
         "-q:v", "4",
         f"{out_dir}/frame_%04d.jpg",
@@ -225,7 +241,7 @@ def _has_drawtext() -> bool:
     """
     try:
         out = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-filters"],
+            [_ffmpeg_bin(), "-hide_banner", "-filters"],
             capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.SubprocessError) as e:
@@ -273,7 +289,7 @@ def _create_contact_sheets(
     def _extract(with_drawtext: bool):
         return subprocess.run(
             [
-                "ffmpeg", "-y", "-i", video_path,
+                _ffmpeg_bin(), "-y", "-i", video_path,
                 "-vf", _frame_filter(fps, with_drawtext),
                 "-q:v", "2",
                 f"{frames_dir}/frame_%04d.jpg",
@@ -312,7 +328,11 @@ def _create_contact_sheets(
         chunk_dir = Path(out_dir) / f"_chunk_{sheet_idx:02d}"
         chunk_dir.mkdir(exist_ok=True)
         for i, frame_path in enumerate(chunk, start=1):
-            os.symlink(frame_path.resolve(), chunk_dir / f"f_{i:04d}.jpg")
+            target_link = chunk_dir / f"f_{i:04d}.jpg"
+            try:
+                os.symlink(frame_path.resolve(), target_link)
+            except OSError:
+                shutil.copy2(frame_path.resolve(), target_link)
         output = Path(out_dir) / f"sheet_{sheet_idx:02d}.jpg"
         # Pick the largest divisor of the chunk size (up to REVIEW_SHEET_COLS) as the
         # column count, so every cell in the tile is filled — zero unfilled cells for any
@@ -322,7 +342,7 @@ def _create_contact_sheets(
         cols_eff = max(c for c in range(1, REVIEW_SHEET_COLS + 1) if len(chunk) % c == 0)
         rows_eff = len(chunk) // cols_eff
         tile_cmd = [
-            "ffmpeg", "-y",
+            _ffmpeg_bin(), "-y",
             "-i", f"{chunk_dir}/f_%04d.jpg",
             "-vf", f"tile={cols_eff}x{rows_eff}:nb_frames={len(chunk)}",
             "-q:v", "2", str(output),
@@ -642,7 +662,7 @@ async def _run_codex_cli(
             args += ["-c", f'model_reasoning_effort="{effort}"']
         args.append(prompt)
         await _spawn_and_check(tuple(args), "codex")
-        answer = out_path.read_text().strip()
+        answer = out_path.read_text(encoding="utf-8").strip()
         if not answer:
             raise RuntimeError(
                 "codex CLI exited cleanly but wrote no answer to its output file"

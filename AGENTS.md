@@ -81,11 +81,14 @@ This project has reusable skills in `skills/`. When the user says `/fk-<name>`, 
 
 | Skill | Purpose |
 |-------|---------|
+| `/fk-action-choreography` | Action Choreography — AI Cinematic Combat & Motion Direction |
 | `/fk-add-material` | fk-add-material — Image Material System |
 | `/fk-brand-logo` | fk-brand-logo — Apply Channel Branding (Intro + Outro + Logo + 4K Badge) |
 | `/fk-camera-guide` | Camera Guide — Cinematic Video Prompts (Veo 3) |
 | `/fk-change-model` | fk-change-model — View & Change Video/Image Model Keys |
 | `/fk-change-provider` | fk-change-provider — View & Switch the Reviewer for a Role |
+| `/fk-character-bible` | Character Bible & Visual Consistency — AI Film Production |
+| `/fk-cinematic-transitions` | Cinematic Transitions & Chapter Bumpers — AI Film Direction |
 | `/fk-concat-fit-narrator` | Trim each scene video to fit its TTS narrator duration, burn text overlays, then concatenate into a final video. |
 | `/fk-concat` | Download and concatenate all scene videos into a single video with optional TTS narration. |
 | `/fk-create-project` | Create a new Google Flow video project. Ask the user for: |
@@ -110,6 +113,8 @@ This project has reusable skills in `skills/`. When the user says `/fk-<name>`, 
 | `/fk-research` | fk-research — Fact-Check & Research Before Scripting |
 | `/fk-review-board` | Start the Scene Review Board web app for visual feedback on scene chains. |
 | `/fk-review-video` | Review AI-generated scene videos for quality. |
+| `/fk-scriptwriter` | The Ultimate AI Screenplay Bible — Google Flow & Veo 3 |
+| `/fk-sound-design` | Sound Design & Audio Mastering — AI Cinematic Soundscapes |
 | `/fk-status` | Show full status dashboard for a project. |
 | `/fk-switch-project` | fk-switch-project — Switch Active Project |
 | `/fk-thumbnail-guide` | YouTube Thumbnail Guide — Hook-Worthy Design Rules |

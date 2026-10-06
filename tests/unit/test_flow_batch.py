@@ -115,10 +115,11 @@ class TestImageRequest:
 
 
 class TestImageUpscaleRequest:
-    PID = "11111111-2222-3333-4444-555555555555"
-
-    @pytest.mark.parametrize("resolution,wire", [("2k", 1), ("4K", 2),
-                                                   ("UPSAMPLE_IMAGE_RESOLUTION_2K", 1)])
+    @pytest.mark.parametrize("resolution,wire", [
+        ("2k", 1),
+        ("4K", 2),
+        ("UPSAMPLE_IMAGE_RESOLUTION_2K", 1),
+    ])
     def test_resolution_maps_to_live_sprcad_wire(self, resolution, wire):
         payload = inner(fb.image_upscale_request("media-1", resolution))
         assert payload[0] == "media-1"
@@ -192,8 +193,7 @@ class TestVideoRequest:
 
     def test_text_video_matches_the_captured_yhhmef_shape(self):
         payload = inner(fb.text_video_request(
-            "a boat",
-            self.PID,
+            "a boat", self.PID,
             aspect="VIDEO_ASPECT_RATIO_LANDSCAPE",
             model="abra_t2v_4s",
         ))
@@ -249,7 +249,6 @@ class TestVideoRequest:
         assert payload[1][5] == self.PID
         assert fb.CAPTCHA_SLOT in json.dumps(payload)
 
-
 class TestReaders:
     OP = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     MID = "12345678-1234-1234-1234-1234567890ab"
@@ -263,20 +262,19 @@ class TestReaders:
         url = f"https://{fb.MEDIA_HOST}/image/{self.MID}?sig=x"
         assert len(fb.read_images([url, url])) == 1
 
-    def test_image_upscale_reads_synchronous_encoded_image(self):
-        assert fb.read_upscaled_image([["media"], "A" * 200]) == "A" * 200
-        with pytest.raises(fb.FlowBatchError):
-            fb.read_upscaled_image([["media"], "short"])
-
     def test_text_video_submit_reads_media_and_workflow_ids(self):
         payload = [None, 10, [], [[self.MID, "project-1", self.OP, "CAE"]]]
-        submitted = fb.read_text_video_submit(payload)
-        assert submitted == {
+        assert fb.read_text_video_submit(payload) == {
             "media_id": self.MID,
             "project_id": "project-1",
             "workflow_id": self.OP,
             "status": "CAE",
         }
+
+    def test_image_upscale_reads_synchronous_encoded_image(self):
+        assert fb.read_upscaled_image([["media"], "A" * 200]) == "A" * 200
+        with pytest.raises(fb.FlowBatchError):
+            fb.read_upscaled_image([["media"], "short"])
 
     def test_upscale_submit_reads_the_new_media_id(self):
         assert fb.read_upscaled_media_id([[self.MID + "_upsampled"]]) == self.MID + "_upsampled"

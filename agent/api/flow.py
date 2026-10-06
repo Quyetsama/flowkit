@@ -6,7 +6,7 @@ import mimetypes
 import os
 from pathlib import Path
 import time
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from urllib.parse import quote
 import uuid
 
@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from agent.config import (
     BASE_DIR,
     OUTPUT_DIR,
-    USE_BATCH_RPC, FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED,
+    FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED,
     FLOW_GENERATION_MIN_INTERVAL_S, FLOW_GENERATION_MAX_CONCURRENT,
     FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
 )
@@ -760,7 +760,6 @@ async def extension_status():
         "at_token_present": bool(session.get("atTokenPresent")),
         "session_url": session.get("url"),
         "flow_key_present": client._flow_key is not None,
-        "legacy_flow_key_authoritative": not USE_BATCH_RPC,
         "generation_throttle": {
             "min_interval_s": FLOW_GENERATION_MIN_INTERVAL_S,
             "max_concurrent": FLOW_GENERATION_MAX_CONCURRENT,
@@ -1302,18 +1301,24 @@ async def _upload_image_bytes(
         raise HTTPException(422, "image payload is empty")
     resolved_project_id = await _resolve_direct_project(client, project_id)
     b64 = base64.b64encode(image_bytes).decode()
-    result = await client.upload_image(
-        b64,
-        mime_type=mime_type,
-        project_id=resolved_project_id,
-        file_name=file_name,
-        cdp_endpoint=cdp_endpoint,
-    )
+    upload_kwargs = {
+        "mime_type": mime_type,
+        "project_id": resolved_project_id,
+        "file_name": file_name,
+    }
+    if cdp_endpoint:
+        upload_kwargs["cdp_endpoint"] = cdp_endpoint
+    try:
+        result = await client.upload_image(b64, **upload_kwargs)
+    except TypeError:
+        upload_kwargs.pop("cdp_endpoint", None)
+        result = await client.upload_image(b64, **upload_kwargs)
+
     if result.get("error") or (
         isinstance(result.get("status"), int) and result["status"] >= 400
     ):
         raise HTTPException(
-            result.get("status", 502),
+            _safe_status_code(result.get("status")),
             result.get("error", result.get("data")),
         )
     media_id = result.get("_mediaId")
@@ -1402,10 +1407,11 @@ async def upload_image(body: UploadImageRequest):
             "image_base64 is recommended; alternatively provide server-local file_path",
         )
 
+    eff_pid = body.project_id or (target_pid if body.profile_id else "")
     return await _upload_image_bytes(
         client,
         image_bytes,
-        project_id=body.project_id or target_pid or "",
+        project_id=eff_pid,
         mime_type=mime,
         file_name=body.file_name,
         cdp_endpoint=target_cdp,
@@ -1839,3 +1845,53 @@ async def serve_flow_file(path: str, download: bool = False):
         headers["Content-Disposition"] = f'inline; filename="{resolved.name}"'
 
     return FileResponse(resolved, media_type=media_type, headers=headers)
+
+@router.get("/debug-cache")
+async def debug_cache():
+    client = get_flow_client()
+    return {
+        "operation_media": client._operation_media,
+        "operation_projects": client._operation_projects,
+        "operation_polls": client._operation_polls,
+    }
+
+
+@router.get("/debug-listing/{operation_id}")
+async def debug_listing(operation_id: str, project_id: str = "594758cc-11f5-4f92-8b3c-1213686591f4"):
+    import agent.services.flow_batch as fb
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    result = await client.batch_rpc(
+        fb.RPC_PROJECT_MEDIA, fb.project_media_request(project_id),
+        match=operation_id, timeout=30,
+    )
+    raw = result.get("data") or ""
+    mid = fb.find_media_id_in_text(raw, operation_id)
+    return {
+        "operation_id": operation_id,
+        "matched_media_id": mid,
+        "raw_preview": raw[:1000],
+    }
+
+
+@router.get("/debug-project-media")
+async def debug_project_media(project_id: str = "594758cc-11f5-4f92-8b3c-1213686591f4"):
+    import re
+    import agent.services.flow_batch as fb
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    result = await client.batch_rpc(
+        fb.RPC_PROJECT_MEDIA, fb.project_media_request(project_id),
+        match=None, timeout=60,
+    )
+    raw = result.get("data") or ""
+    uuids = list(set(re.findall(r'[0-9a-fA-F-]{36}', raw)))
+    return {
+        "raw_length": len(raw),
+        "found_uuids_count": len(uuids),
+        "uuids": uuids,
+        "sample": raw[:2000],
+    }
+

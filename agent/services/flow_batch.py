@@ -41,6 +41,7 @@ RPC_GEN_VIDEO_TEXT = "YhhmEf"
 RPC_GEN_VIDEO_FIRST_LAST = "nprQif"
 RPC_GEN_VIDEO_REFERENCES = "MZZa6b"
 RPC_OPERATION = "jwpduf"
+RPC_CREATE_PROJECT = "jHPbke"
 RPC_PROJECT_MEDIA = "Zzl0ze"
 RPC_MEDIA = "as29s"
 RPC_UPLOAD_IMAGE = "maseQ"
@@ -49,6 +50,7 @@ RPC_UPSCALE_IMAGE = "SPrCad"
 
 CAPTCHA_IMAGE = "IMAGE_GENERATION"
 CAPTCHA_VIDEO = "VIDEO_GENERATION"
+CAPTCHA_CHAT = "CHAT_GENERATION"
 
 #: The extension substitutes a freshly minted reCAPTCHA token for this marker.
 #: It has to be a placeholder rather than a real token because the mint has to
@@ -65,6 +67,14 @@ IMAGE_MODELS = {"GEM_PIX_2", "NARWHAL", "HARBOR_SEAL"}
 IMAGE_MODEL = "GEM_PIX_2"
 
 #: Friendly names FlowKit already exposes. Exact Flow wire ids work too.
+#: Current image model wire ids observed in the Flow frontend. Unknown future
+#: ids are accepted by ``resolve_image_model`` instead of being silently
+#: replaced by the default, so callers can opt into a newly exposed model
+#: before Flow Kit itself ships another release.
+IMAGE_MODELS = {"GEM_PIX_2", "NARWHAL", "HARBOR_SEAL"}
+IMAGE_MODEL = "GEM_PIX_2"
+
+#: Friendly aliases. Exact Flow wire ids work too.
 IMAGE_MODEL_BY_NICKNAME = {
     "NANO_BANANA_PRO": "GEM_PIX_2",
     "NANO_BANANA_2": "NARWHAL",
@@ -87,7 +97,7 @@ ASPECT_BY_NAME = {
     "IMAGE_ASPECT_RATIO_SQUARE": ASPECT_SQUARE,
     "IMAGE_ASPECT_RATIO_PORTRAIT": ASPECT_PORTRAIT,
     "IMAGE_ASPECT_RATIO_LANDSCAPE": ASPECT_LANDSCAPE,
-    # Current Flow spelling plus the old FlowKit alias for compatibility.
+    # Current spelling plus the old Flow Kit alias for compatibility.
     "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR": ASPECT_PORTRAIT_4_3,
     "IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE": ASPECT_PORTRAIT_4_3,
     "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE": ASPECT_LANDSCAPE_4_3,
@@ -151,8 +161,11 @@ SURFACE_ID = 22
 #: nothing was reframed by hand (live-captured 2026-09-23).
 FULL_FRAME_CROP = [None, None, 1, 1]
 
-#: Image inputs put the media id FIRST and the input type four slots later.
+#: Image inputs put the media id first and the input type four slots later.
 #: Type 1 is a reference; type 2 is the image being edited (BASE_IMAGE).
+REF_TYPE_IMAGE = 1
+BASE_TYPE_IMAGE = 2
+IMAGE_UPSCALE_RESOLUTIONS = {"2K": 1, "4K": 2}
 
 
 class RpcError(RuntimeError):
@@ -214,9 +227,9 @@ class MediaUrls:
 def resolve_image_model(key: Optional[str]) -> str:
     """Nickname or wire id in, wire id out.
 
-    Flow adds image models independently of FlowKit releases. A syntactically
-    valid, previously unseen wire id therefore passes through unchanged instead
-    of being silently replaced by the default model.
+    Flow can add image models independently of Flow Kit releases. A
+    syntactically valid, previously unseen wire id therefore passes through
+    unchanged instead of being silently replaced by the default model.
     """
     if isinstance(key, str):
         normalized = key.strip().upper().replace("-", "_")
@@ -347,9 +360,9 @@ def _client_uuid() -> str:
     return str(uuid.uuid4()).upper()
 
 
-def _context(project_id: str) -> list:
+def _context(project_id: str, asset_id: Optional[str] = None) -> list:
     """The surface/project/captcha envelope every generate call repeats."""
-    return [None, SURFACE_ID, None, None, None, project_id, None, None, None, None,
+    return [None, SURFACE_ID, None, None, asset_id, project_id, None, None, None, None,
             [CAPTCHA_SLOT, 1]]
 
 
@@ -370,7 +383,8 @@ def image_request(prompt: str, project_id: str, count: int = 1,
                   prompts: Optional[list[str]] = None,
                   model: str = IMAGE_MODEL,
                   ref_media_ids: Optional[list[str]] = None,
-                  base_media_id: Optional[str] = None) -> str:
+                  base_media_id: Optional[str] = None,
+                  asset_id: Optional[str] = None) -> str:
     """One request item per variant, exactly as the REST payload did it.
 
     There is no "how many" field: Flow returns one image per item in the list,
@@ -384,6 +398,7 @@ def image_request(prompt: str, project_id: str, count: int = 1,
     resolved_model = resolve_image_model(model)
     base = seed if seed is not None else random.randint(1, 10**9)
     items = []
+    target_asset = asset_id or base_media_id
     for index in range(count):
         text = prompts[index] if prompts and index < len(prompts) else prompt
         image_inputs = []
@@ -393,11 +408,24 @@ def image_request(prompt: str, project_id: str, count: int = 1,
             _reference(mid) for mid in (ref_media_ids or []) if mid != base_media_id
         )
         items.append([None, None, image_inputs or None, base + index * 9973, ratio,
-                      resolved_model, None, _context(project_id), [[[text]]],
-                      None, None, None, _client_uuid(), _client_uuid()])
-    return build_envelope(RPC_GEN_IMAGE, [None, items, 1, _context(project_id),
+                      resolved_model, None, _context(project_id, target_asset), [[[text]]],
+                      None, None, None, None, _client_uuid()])
+    return build_envelope(RPC_GEN_IMAGE, [None, items, 1, _context(project_id, target_asset),
                                           [_client_uuid()]])
 
+
+STREAM_CHAT_PATH = "/_/AiSandboxAngularFrontend/data/google.internal.labs.aisandbox.proto.flow.agent.v1.FlowCreationAgentService/StreamChat"
+
+
+def stream_chat_request(prompt: str, project_id: str, client_uuid: str | None = None) -> str:
+    """Build the f.req payload for FlowCreationAgentService/StreamChat."""
+    cid = client_uuid or str(uuid.uuid4())
+    inner = [
+        cid,
+        [[[[prompt]]]],
+        [f"projects/{project_id}", None, [CAPTCHA_SLOT, 1], None, None, 9],
+    ]
+    return json.dumps([None, json.dumps(inner, separators=(",", ":"), ensure_ascii=False)], separators=(",", ":"), ensure_ascii=False)
 
 def image_upscale_request(media_id: str, resolution: str = "2K") -> str:
     """Build the current FlowService.UpsampleImage request (RPC SPrCad)."""
@@ -576,7 +604,6 @@ def upscale_request(media_id: str, project_id: str,
         [_client_uuid()],
     ])
 
-
 def upload_request(image_b64: str, project_id: str, mime_type: str = "image/jpeg",
                    file_name: str = "upload.jpg") -> str:
     """Put a local image into the project so it can be used as a reference.
@@ -672,7 +699,6 @@ def read_upscaled_image(payload: Any) -> str:
         raise FlowBatchError("image upscale response carried no encoded image")
     return encoded
 
-
 def read_text_video_submit(payload: Any) -> dict:
     """Read YhhmEf's submitted media/workflow record."""
     records = payload[3] if isinstance(payload, list) and len(payload) > 3 else None
@@ -691,7 +717,6 @@ def read_text_video_submit(payload: Any) -> dict:
         "workflow_id": workflow_id if isinstance(workflow_id, str) else media_id,
         "status": status if isinstance(status, str) else None,
     }
-
 
 def read_upscaled_media_id(payload: Any) -> str:
     """Return the media id created by the p0UkFb upscale submit."""
@@ -742,14 +767,23 @@ def find_media_id(payload: Any, operation_id: str) -> Optional[str]:
     """Look an operation up in the project listing and take its media id.
 
     Entries look like
-    ``[opId, null, null, [title, created, null, null, mediaId, clientUuid, done], projectId]``.
+    ``[assetId, folderId, null, [title, [sec, nanos], isVideo, null, mediaId, opId, done], projectId]``.
     """
+    op_lower = operation_id.lower()
     for node in _walk_lists(payload):
-        if len(node) < 4 or node[0] != operation_id:
+        if not isinstance(node, list) or len(node) < 4:
             continue
         detail = node[3]
-        if isinstance(detail, list) and len(detail) > 4 and isinstance(detail[4], str):
-            return detail[4]
+        if not isinstance(detail, list) or len(detail) <= 4:
+            continue
+        # 1. Match assetId directly
+        if isinstance(node[0], str) and node[0].lower() == op_lower:
+            if isinstance(detail[4], str):
+                return detail[4]
+        # 2. Match opId in detail[5]
+        if len(detail) > 5 and isinstance(detail[5], str) and detail[5].lower() == op_lower:
+            if isinstance(detail[4], str):
+                return detail[4]
     return None
 
 
@@ -760,17 +794,16 @@ _MEDIA_SLOT = re.compile(r'null,null,\\?"([0-9a-fA-F-]{36})\\?"')
 
 
 def find_media_id_in_text(text: str, operation_id: str) -> Optional[str]:
-    """Same lookup as :func:`find_media_id`, but on an unparsed listing.
-
-    The project listing has no page size that shrinks it and grows with every
-    generation, so it will outrun whatever response cap is in place — and a
-    truncated tail cannot be JSON-decoded even though the entry we want is
-    sitting in it intact. Scanning the text finds it anyway.
-    """
-    start = text.find(operation_id)
+    """Same lookup as :func:`find_media_id`, but case-insensitive on unparsed listing."""
+    lower_text = text.lower()
+    lower_op = operation_id.lower()
+    start = lower_text.find(lower_op)
     if start == -1:
         return None
-    match = _MEDIA_SLOT.search(text, start, start + 800)
+    # Search within window of match (from operation start onwards to avoid matching previous items)
+    window_start = start
+    window_end = min(len(text), start + 800)
+    match = _MEDIA_SLOT.search(text, window_start, window_end)
     return match.group(1) if match else None
 
 

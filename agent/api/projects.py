@@ -10,7 +10,8 @@ import aiohttp
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from agent.config import BASE_DIR, USE_BATCH_RPC
+from agent.utils.paths import file_url_to_path
+from agent.config import BASE_DIR
 from agent.models.project import Project, ProjectCreate, ProjectUpdate
 from agent.models.character import Character
 from agent.sdk.persistence.sqlite_repository import SQLiteRepository
@@ -212,6 +213,7 @@ async def create(body: ProjectCreate):
         material=material_id,
         allow_music=create_data.get("allow_music", False),
         allow_voice=create_data.get("allow_voice", False),
+        video_model_family=create_data.get("video_model_family", "veo"),
     )
 
     # Step 3: Create reference entities (characters, locations, assets) with profiles
@@ -296,9 +298,88 @@ async def get_characters(pid: str):
     return await repo.get_project_characters(pid)
 
 
+async def _build_or_update_series_manifest(repo, project, slug: str, output_dir: Path) -> dict:
+    """Build or synchronize the project-level series_manifest.json."""
+    pid = getattr(project, "id", None) or (project.get("id") if isinstance(project, dict) else "")
+    project_name = getattr(project, "name", None) or (project.get("name") if isinstance(project, dict) else "")
+    manifest_path = output_dir / "series_manifest.json"
+
+    existing = {}
+    if manifest_path.exists():
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+
+    chars = await repo.get_project_characters(pid)
+    chars_list = []
+    locs_list = []
+    props_list = []
+
+    for c in chars:
+        entity_type = getattr(c, "entity_type", None) or "character"
+        entry = {
+            "name": getattr(c, "name", ""),
+            "slug": getattr(c, "slug", ""),
+            "entity_type": entity_type,
+            "description": getattr(c, "description", None),
+            "image_prompt": getattr(c, "image_prompt", None),
+            "voice_description": getattr(c, "voice_description", None),
+            "media_id": getattr(c, "media_id", None),
+            "reference_image_url": getattr(c, "reference_image_url", None),
+        }
+        if entity_type == "character":
+            chars_list.append(entry)
+        elif entity_type == "location":
+            locs_list.append(entry)
+        else:
+            props_list.append(entry)
+
+    videos = await repo.list_videos(pid)
+    existing_eps_by_vid = {ep.get("video_id"): ep for ep in existing.get("episodes", []) if "video_id" in ep}
+    episodes = []
+    for idx, v in enumerate(videos, 1):
+        scenes = await repo.list_scenes(v.id)
+        old_ep = existing_eps_by_vid.get(v.id, {})
+        episodes.append({
+            "episode": getattr(v, "display_order", idx) or idx,
+            "title": getattr(v, "title", None) or old_ep.get("title") or f"Episode {idx}",
+            "subtitle": getattr(v, "description", "") or old_ep.get("subtitle", ""),
+            "video_id": v.id,
+            "scene_count": len(scenes) if scenes else 0,
+            "status": getattr(v, "status", "IN_PROGRESS"),
+        })
+
+    first_vid = videos[0] if videos else None
+    orientation = (getattr(first_vid, "orientation", None) if first_vid else None) or existing.get("orientation", "HORIZONTAL")
+    material_val = getattr(project, "material", None) or (project.get("material") if isinstance(project, dict) else "") or existing.get("material", "realistic")
+    story_val = getattr(project, "story", None) or (project.get("story") if isinstance(project, dict) else "") or existing.get("story_bible", "")
+
+    manifest = {
+        "series_title": existing.get("series_title") or project_name,
+        "slug": slug,
+        "genre": existing.get("genre", "Cinematic / Realistic"),
+        "material": material_val,
+        "orientation": orientation,
+        "story_bible": story_val,
+        "default_voice": existing.get("default_voice", "vi-VN-NamMinhNeural"),
+        "origin_project_id": pid,
+        "shared_entities": {
+            "characters": chars_list,
+            "locations": locs_list,
+            "key_props": props_list,
+        },
+        "episodes": episodes,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    return manifest
+
+
 @router.get("/{pid}/output-dir")
 async def get_output_dir(pid: str):
-    """Get or create project output directory with meta.json."""
+    """Get or create project output directory with meta.json and series_manifest.json."""
     repo = _get_repo()
     project = await repo.get_project(pid)
     if not project:
@@ -335,11 +416,34 @@ async def get_output_dir(pid: str):
     }
     meta_path = output_dir / "meta.json"
     if meta_path.exists():
-        existing = json.loads(meta_path.read_text())
+        existing = json.loads(meta_path.read_text(encoding="utf-8"))
         meta["created_at"] = existing.get("created_at", now)
-    meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    return {"slug": slug, "path": f"output/{slug}", "meta": meta}
+    # Automatically generate or update per-project series_manifest.json
+    manifest = await _build_or_update_series_manifest(repo, project, slug, output_dir)
+
+    return {
+        "slug": slug,
+        "path": f"output/{slug}",
+        "meta": meta,
+        "manifest_path": f"output/{slug}/series_manifest.json"
+    }
+
+
+@router.get("/{pid}/manifest")
+async def get_project_manifest(pid: str):
+    """Retrieve or auto-generate the project's series_manifest.json."""
+    repo = _get_repo()
+    project = await repo.get_project(pid)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    project_name = getattr(project, "name", None) or (project.get("name") if isinstance(project, dict) else "")
+    slug = slugify(project_name)
+    output_dir = BASE_DIR / "output" / slug
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return await _build_or_update_series_manifest(repo, project, slug, output_dir)
+
 
 
 _ASPECT_RATIO_MAP = {
@@ -467,8 +571,8 @@ async def generate_thumbnail(pid: str, body: ThumbnailRequest):
             except aiohttp.ClientError as e:
                 raise HTTPException(502, f"Failed to download image: {e}") from e
         elif gen_result.url.startswith("file://"):
-            src = Path(urlparse(gen_result.url).path)
-            if not src.is_file():
+            src = file_url_to_path(gen_result.url)
+            if src is None or not src.is_file():
                 raise HTTPException(502, f"Provider returned missing file: {gen_result.url}")
             shutil.copy2(src, output_path)
 

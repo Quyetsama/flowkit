@@ -24,7 +24,6 @@ from agent.studio.models import BatchJobConfig, BatchTask, ProfileConfig, TaskSt
 from agent.studio.profile_manager import profile_manager
 from agent.services.flow_client import get_flow_client
 from agent.services.omni_flash import generate_omni_flash_text_video
-from agent.config import GOOGLE_API_KEY, GOOGLE_FLOW_API
 
 logger = logging.getLogger(__name__)
 

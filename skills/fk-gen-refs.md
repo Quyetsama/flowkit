@@ -7,7 +7,7 @@ Usage: `/fk-gen-refs <project_id>`
 Usage: `/fk-gen-refs <project_id> [--provider <name>]`
 
 Pass `"provider": "<name>"` on each item in the `/api/requests/batch`
-payload (`flow` | `assistant`; default is the server `DEFAULT_PROVIDER`).
+payload (`flow` | `assistant` | `muse2api`; default is the server `DEFAULT_PROVIDER`).
 The assistant provider queues a provider job — make sure a worker is running
 (see `/fk-provider`).
 

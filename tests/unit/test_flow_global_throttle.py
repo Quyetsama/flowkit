@@ -81,6 +81,25 @@ async def test_unusual_activity_opens_local_circuit_breaker(monkeypatch):
     assert second["status"] == 429
     assert "local cooldown active" in second["error"]
     assert calls == 1
+    assert client.generation_guard_status["cooldown_active"] is True
+    assert client.generation_guard_status["last_unusual_activity_rpc"] == fb.RPC_GEN_VIDEO_TEXT
+
+
+@pytest.mark.asyncio
+async def test_non_generation_rpc_bypasses_generation_guard(monkeypatch):
+    client = fc.FlowClient()
+    client._generation_unusual_until = asyncio.get_running_loop().time() + 60
+    calls = 0
+
+    async def fake_direct(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return {"status": 200, "data": "metadata"}
+
+    monkeypatch.setattr(fc, "run_flow_batch_rpc", fake_direct)
+    result = await client.batch_rpc("meta", "x")
+    assert result["status"] == 200
+    assert calls == 1
 
 
 @pytest.mark.asyncio

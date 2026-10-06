@@ -5,8 +5,8 @@ Usage: `/fk-thumbnail [project_id] [--provider <name>]`
 
 Usage: `/fk-thumbnail [project_id] [--provider <name>]`
 
-Pass `"provider"` in the `generate-thumbnail` payload (`flow` | `assistant`;
-default is the server `DEFAULT_PROVIDER`). The assistant provider queues a
+Pass `"provider"` in the `generate-thumbnail` payload (`flow` | `assistant` |
+`muse2api`; default is the server `DEFAULT_PROVIDER`). The assistant provider queues a
 provider job — make sure a worker is running (see `/fk-provider`). Flow
 thumbnail generation needs the Chrome extension; assistant needs none.
 

@@ -2,7 +2,9 @@
 
 FlowKit is provider-neutral. A **media provider** is the backend that renders
 media: `flow` (Google Flow via the Chrome extension), `assistant` (Muse or any
-HTTP-capable external worker), or any future registered provider.
+HTTP-capable external worker), `muse2api` (muse.ai through a
+[muse2api](https://github.com/crisng95/muse2api) gateway), or any future
+registered provider.
 
 Every generation request, thumbnail, and TTS call accepts an optional
 `provider`. Omit it and the server default (`DEFAULT_PROVIDER`, usually
@@ -48,9 +50,43 @@ audio — it is rejected with 400.)
 
 - `flow`: image, edit_image, i2v (image-to-video), r2v, upscale. **No audio.**
 - `assistant`: image, edit_image, i2v, r2v, **audio (TTS)**. No upscale.
+- `muse2api`: image, i2v. No edit_image, upscale or audio. No end frame and no
+  r2v unless `MUSE2API_ALLOW_DEGRADED=1` (then both render as plain i2v).
+  Entity reference images are not sent — muse.ai takes none.
 
 Asking a provider for a kind it doesn't support returns 400 with a message
 naming the right backend to use instead.
+
+## The muse2api provider needs a gateway
+
+`muse2api` calls a running [muse2api](https://github.com/crisng95/muse2api)
+service over HTTP — Flow Kit → `Muse2APIProvider` → muse2api → muse.ai. The
+gateway owns the muse.ai accounts, failover and cooldowns; Flow Kit only needs
+its URL and key:
+
+```bash
+# muse2api side (its own repo): python -m muse2api  →  http://127.0.0.1:18610
+export MUSE2API_URL=http://127.0.0.1:18610
+export MUSE2API_KEY=<the gateway's MUSE2API_API_KEY>   # data/api_key if auto-generated
+# optional: DEFAULT_PROVIDER=muse2api to make it the default backend
+```
+
+`muse2api.available` is true once `MUSE2API_URL` is set. Check the gateway
+itself with `curl -s $MUSE2API_URL/readyz` — `accounts.available: 0` means
+every request will fail `no_account_available` (import an account on the
+gateway via its `/admin/accounts`).
+
+Output is downloaded into `output/_shared/muse2api/` and stored as `file://`
+URLs, so like the assistant it never needs `/fk-refresh-urls`.
+
+| Error (request `error_message`) | Meaning | Fix |
+|---|---|---|
+| `muse2api provider is not configured` | `MUSE2API_URL` unset | set it and restart the server |
+| `muse2api connection_error` | gateway not reachable | start muse2api / fix the URL |
+| `muse2api invalid_api_key (HTTP 401)` | wrong key | use the gateway's `MUSE2API_API_KEY` |
+| `muse2api no_account_available (HTTP 503)` | no usable muse.ai account | add/renew accounts on the gateway |
+| `muse2api upstream_quota_exhausted (HTTP 429)` | account out of quota | wait for cooldown or add accounts |
+| `muse2api has no end-frame input` | chained scene | `MUSE2API_ALLOW_DEGRADED=1`, or use `flow` |
 
 ## The assistant provider needs a worker
 

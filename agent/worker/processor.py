@@ -296,7 +296,7 @@ async def _process_one(req: dict, deferred: dict = None, retry_after: dict = Non
             char = await crud.get_character(req.get("character_id"))
             if char:
                 skip_kwargs["media_id"] = char.get("media_id")
-                skip_kwargs["output_url"] = char.get("image_url")
+                skip_kwargs["output_url"] = char.get("reference_image_url") or char.get("image_url")
         else:
             scene = await crud.get_scene(req.get("scene_id"))
             if scene:
@@ -481,12 +481,12 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
     if isinstance(error_msg, dict):
         error_msg = json.dumps(error_msg)[:200]
 
-    # Auto-recover expired media by re-uploading
-    if "not found" in str(error_msg).lower():
+    # Auto-recover expired media by re-uploading (only on real entity-not-found, never on polling timeout)
+    if "not found" in str(error_msg).lower() and "polling timeout" not in str(error_msg).lower():
         recovered = await _recover_entity_not_found(req)
         if recovered:
             logger.info("Request %s: recovered expired media, retrying", rid[:8])
-            await crud.update_request(rid, status="PENDING", error_message=f"recovered: {error_msg}")
+            await crud.update_request(rid, status="PENDING", request_id=None, error_message=f"recovered: {error_msg}")
             return
 
     error_lower = str(error_msg).lower()
@@ -531,7 +531,7 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
         return
 
     # reCAPTCHA errors: retry up to 10 times — deferred dict in main loop handles delay
-    if "captcha" in error_lower or "recaptcha" in error_lower:
+    if "captcha" in error_lower or "recaptcha" in error_lower or "unusual_activity" in error_lower:
         retry = req.get("retry_count", 0) + 1
         if retry < 10:
             await crud.update_request(rid, status="PENDING", retry_count=retry, error_message=str(error_msg))
@@ -580,16 +580,24 @@ async def _mark_scene_failed(req: dict):
 
 
 async def _is_already_completed(req: dict, orientation: str) -> bool:
-    scene_id = req.get("scene_id")
     req_type = req.get("type", "")
-    if not scene_id or req_type == "GENERATE_CHARACTER_IMAGE":
+    if req_type in ("EDIT_IMAGE", "REGENERATE_IMAGE", "REGENERATE_VIDEO", "REGENERATE_CHARACTER_IMAGE", "EDIT_CHARACTER_IMAGE"):
+        return False  # Always run — explicitly requesting new generation
+
+    if req_type == "GENERATE_CHARACTER_IMAGE":
+        char_id = req.get("character_id")
+        if not char_id:
+            return False
+        char = await crud.get_character(char_id)
+        return bool(char and char.get("media_id"))
+
+    scene_id = req.get("scene_id")
+    if not scene_id:
         return False
     scene = await crud.get_scene(scene_id)
     if not scene:
         return False
     prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
-    if req_type in ("EDIT_IMAGE", "REGENERATE_IMAGE", "REGENERATE_VIDEO", "REGENERATE_CHARACTER_IMAGE", "EDIT_CHARACTER_IMAGE"):
-        return False  # Always run — explicitly requesting new generation
     if req_type == "GENERATE_IMAGE":
         return scene.get(f"{prefix}_image_status") == "COMPLETED"
     if req_type in ("GENERATE_VIDEO", "GENERATE_VIDEO_REFS"):

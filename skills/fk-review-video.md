@@ -249,19 +249,34 @@ HIGH errors → note `usable_segments` before the error timestamp. Trim or regen
 
 MINOR errors → acceptable for most use cases. Polish optional.
 
-### Prevention Patterns
+### Automatic Prompt Healing (Self-Correction Loop for Scores < 7.5)
 
-| Issue | Fix |
-|-------|-----|
-| Character drift | Simpler prompts, add "steady camera, minimal movement" |
-| Breed swap | Use high color contrast between similar characters |
-| Character count | ONE dominant character, others in background |
-| Reverse motion | Regen video (luck-based, different seed) |
-| Brand logos | Add "no brand logos, no text" to prompt |
-| Camera drift | Add "static camera" or "locked-off shot" to video_prompt |
-| Human hands | Add "paws, claws, hooves" (or correct anatomy) to prompt |
+In compliance with **Critical Rule 16**, any scene scoring below 7.5 undergoes automated diagnostic healing and regeneration (capped at 2 cycles):
+
+1. **Extract Error Vectors from the `errors` Array:**
+   - If error contains `Camera Drift`: Append `locked-off static camera, subtle smooth tracking` to the camera sentence.
+   - If error contains `Character Drift`: Append `strictly preserves identical facial bone structure and eye color from reference`.
+   - If error contains `Object/Anatomy Morph`: Append `natural realistic anatomy, five distinct fingers, rigid solid weapon hilt`.
+   - If error contains `Reverse Motion / Jerk`: Append `continuous linear motion, fluid steady trajectory without backward hitch`.
+
+2. **Update Scene via PATCH (Rule 13):**
+   ```bash
+   curl -X PATCH http://127.0.0.1:8100/api/scenes/<SID> \
+     -H "Content-Type: application/json" \
+     -d '{"video_prompt": "<healed_video_prompt>"}'
+   ```
+
+3. **Dispatch REGENERATE_VIDEO Request:**
+   ```bash
+   curl -X POST http://127.0.0.1:8100/api/requests \
+     -H "Content-Type: application/json" \
+     -d '{"type": "REGENERATE_VIDEO", "scene_id": "<SID>", "project_id": "<PID>", "video_id": "<VID>", "orientation": "${ORI}"}'
+   ```
+
+---
 
 ## Cost Note
+
 
 Each scene review = 1 Claude Vision API call with N frames.
 - Light mode (32 frames/scene): ~$0.01–0.03 per scene
