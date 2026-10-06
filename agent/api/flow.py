@@ -751,7 +751,7 @@ async def extension_status():
     signed_in = bool(session.get("signedIn")) if isinstance(session, dict) else False
     return {
         "connected": client.connected,
-        "transport": "batch" if USE_BATCH_RPC else "legacy_rest",
+        "transport": "batch",
         "flow_project_id": FLOW_PROJECT_ID or None,
         "allow_degraded": FLOW_ALLOW_DEGRADED,
         "authenticated": signed_in,

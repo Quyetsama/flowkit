@@ -30,6 +30,7 @@ FLOW_PROJECT_ID = os.environ.get("FLOW_PROJECT_ID", "")
 # Legacy Flow / Google environment constants kept for backward compatibility
 GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
 GOOGLE_FLOW_API: str = os.getenv("GOOGLE_FLOW_API", "https://labs.google/fx/api")
+USE_BATCH_RPC: bool = True
 
 # Ad-hoc direct /api/flow calls without a project share a short-lived project.
 # The lease survives browser tab parking and agent restarts, but rotates after
